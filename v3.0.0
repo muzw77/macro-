@@ -1,0 +1,1137 @@
+-- MADE BY Muzw :D
+-- v3.0.0 - Full rewrite with settings UI, buff collection, stat saving, game lock
+
+-- ─────────────────────────────────────────────────────────────────────
+-- GAME ID LOCK
+-- ─────────────────────────────────────────────────────────────────────
+
+repeat task.wait() until game:IsLoaded()
+
+local ALLOWED_GAME_ID = 15532962292
+if game.PlaceId ~= ALLOWED_GAME_ID then
+    warn("[EggBot] Wrong game! PlaceId " .. game.PlaceId .. " is not authorized.")
+    return
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- PERFORMANCE OPTIMIZATIONS
+-- ─────────────────────────────────────────────────────────────────────
+
+local RunService         = game:GetService("RunService")
+local Lighting           = game:GetService("Lighting")
+local TweenService       = game:GetService("TweenService")
+local UserInputService   = game:GetService("UserInputService")
+local HttpService        = game:GetService("HttpService")
+
+-- [PERF] Reduce render quality
+pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+
+-- [PERF] Disable terrain decoration
+pcall(function() workspace.Terrain.Decoration = false end)
+
+-- [PERF] Disable global shadows
+pcall(function() Lighting.GlobalShadows = false end)
+
+-- [PERF] Reduce fog overhead
+pcall(function()
+    Lighting.FogEnd   = 100000
+    Lighting.FogStart = 100000
+end)
+
+-- [PERF] Remove post-processing effects
+pcall(function()
+    for _, effect in ipairs(Lighting:GetChildren()) do
+        if effect:IsA("PostEffect") then effect.Enabled = false end
+    end
+end)
+
+-- [PERF] Strip visuals from existing workspace descendants
+task.spawn(function()
+    for _, v in ipairs(workspace:GetDescendants()) do
+        pcall(function()
+            if v:IsA("BasePart") then v.CastShadow = false end
+            if v:IsA("ParticleEmitter") then v.Enabled = false v.Rate = 0
+            elseif v:IsA("Trail") then v.Enabled = false
+            elseif v:IsA("Beam") then v.Enabled = false
+            elseif v:IsA("Texture") or v:IsA("Decal") then v.Transparency = 1
+            elseif v:IsA("Sky") then v:Destroy()
+            elseif v:IsA("SpecialMesh") then v.TextureId = ""
+            end
+        end)
+    end
+end)
+
+-- [PERF] Strip visuals on new descendants
+workspace.DescendantAdded:Connect(function(desc)
+    task.defer(function()
+        pcall(function()
+            if desc:IsA("BasePart") then desc.CastShadow = false end
+            if desc:IsA("ParticleEmitter") then desc.Enabled = false desc.Rate = 0
+            elseif desc:IsA("Trail") then desc.Enabled = false
+            elseif desc:IsA("Beam") then desc.Enabled = false
+            elseif desc:IsA("Texture") or desc:IsA("Decal") then desc.Transparency = 1
+            elseif desc:IsA("Sky") then desc:Destroy()
+            elseif desc:IsA("SpecialMesh") then desc.TextureId = ""
+            end
+        end)
+    end)
+end)
+
+-- ─────────────────────────────────────────────────────────────────────
+-- STAT PERSISTENCE (writefile / shared fallback)
+-- ─────────────────────────────────────────────────────────────────────
+
+local STATS_FILE = "eggbot_stats.json"
+
+local function loadStats()
+    -- Try readfile first
+    local ok, data = pcall(readfile, STATS_FILE)
+    if ok and data and data ~= "" then
+        local parsed = pcall(function()
+            local t = HttpService:JSONDecode(data)
+            shared.totalPoints = t.points or 0
+            shared.startTime   = shared.startTime or tick() -- don't restore time, just points
+        end)
+    end
+    shared.totalPoints = shared.totalPoints or 0
+    shared.startTime   = shared.startTime   or tick()
+end
+
+local function saveStats()
+    pcall(writefile, STATS_FILE, HttpService:JSONEncode({ points = shared.totalPoints }))
+end
+
+loadStats()
+
+local totalPoints = shared.totalPoints
+local startTime   = shared.startTime
+
+-- ─────────────────────────────────────────────────────────────────────
+-- SINGLE INSTANCE GUARD
+-- ─────────────────────────────────────────────────────────────────────
+
+shared.EggBotRunning = shared.EggBotRunning or false
+
+local function isRunning() return shared.EggBotRunning == true end
+local function setRunning(v) shared.EggBotRunning = v end
+
+if isRunning() then
+    warn("[EggBot] Previous instance detected, shutting down...")
+    setRunning(false)
+    task.wait(0.5)
+end
+
+setRunning(true)
+
+-- ─────────────────────────────────────────────────────────────────────
+-- FEATURE TOGGLES
+-- ─────────────────────────────────────────────────────────────────────
+
+local Features = {
+    farmEggs   = true,
+    collectBuffs = true,
+}
+
+-- ─────────────────────────────────────────────────────────────────────
+-- ANTI-STUCK GEOMETRY
+-- ─────────────────────────────────────────────────────────────────────
+
+if workspace:FindFirstChild("Slope1") then
+    task.spawn(function()
+        for _, name in ipairs({"Slope1","Anti-Stuck1","Anti-Stuck2","Anti-Stuck3","Anti-Stuck4"}) do
+            local v = workspace:FindFirstChild(name)
+            if v then v:Destroy() end
+        end
+    end)
+end
+
+local function makePart(props)
+    local p = Instance.new("Part", workspace)
+    p.CastShadow = false
+    p.Material   = Enum.Material.SmoothPlastic
+    for k, v in pairs(props) do p[k] = v end
+    return p
+end
+
+makePart({ Name="SlopeSoNoStuckyPoo",  Size=Vector3.new(10,15,15),  Position=Vector3.new(448.75,102.75,-406),   Rotation=Vector3.new(0,90,0),  Shape=Enum.PartType.Wedge, Anchored=true, Transparency=0.5 })
+makePart({ Name="SlopeSoNoStuckyPoo2", Size=Vector3.new(33,20,30),  Position=Vector3.new(-63,85,-182),          Rotation=Vector3.new(0,0,0),   Shape=Enum.PartType.Wedge, Anchored=true, Transparency=0.5 })
+makePart({ Name="SlopeSoNoStuckyPoo3", Size=Vector3.new(20,20,19),  Position=Vector3.new(478.548,102,−399.614), Rotation=Vector3.new(0,90,0),  Shape=Enum.PartType.Wedge, Anchored=true, Transparency=0.5 })
+makePart({ Name="Anti-Stuck1", Anchored=true, Size=Vector3.new(2,34,21),   Position=Vector3.new(321,100,-390),      Rotation=Vector3.new(-90,0,180),  Transparency=0.5 })
+makePart({ Name="Anti-Stuck2", Anchored=true, Size=Vector3.new(25,40,5),   Position=Vector3.new(278.137,106,-433.454), Rotation=Vector3.new(0,-70,0), Transparency=0.5 })
+makePart({ Name="Anti-Stuck3", Anchored=true, Size=Vector3.new(25,40,5),   Position=Vector3.new(255.786,106,-452.495), Rotation=Vector3.new(0,-20,0), Transparency=0.5 })
+makePart({ Name="Anti-Stuck4", Anchored=true, Size=Vector3.new(40,50,8),   Position=Vector3.new(113.875,100,-444),  Rotation=Vector3.new(0,-90,0), Transparency=0.5 })
+makePart({ Name="Anti-Stuck5", Anchored=true, Size=Vector3.new(80,2,8),    Position=Vector3.new(400,91,-316.5),     Rotation=Vector3.new(0,0,0),   Transparency=0.5 })
+
+-- ─────────────────────────────────────────────────────────────────────
+-- SERVICES / PLAYER
+-- ─────────────────────────────────────────────────────────────────────
+
+local Players            = game:GetService("Players")
+local PathfindingService = game:GetService("PathfindingService")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- ─────────────────────────────────────────────────────────────────────
+-- CONSTANTS
+-- ─────────────────────────────────────────────────────────────────────
+
+local PATH_PARAMS = {
+    AgentHeight     = 1.5,
+    AgentRadius     = 2,
+    AgentCanJump    = true,
+    AgentJumpHeight = 25,
+    WaypointSpacing = shared.spacing or 2,
+}
+
+local REACH_DIST            = 4.5
+local WAYPOINT_TIMEOUT      = 2.5
+local STUCK_CHECK_AFTER     = 0.8
+local MAX_PATH_ATTEMPTS     = 5
+local WALK_HARD_TIMEOUT     = 90
+local QUEUE_COOLDOWN        = 0.2
+local GAP_DEPTH_THRESHOLD   = 5
+local MAX_JUMPABLE_GAP      = 4
+local PARKOUR_JUMP_BOOST    = true
+local STUCK_RESET_THRESHOLD = 4
+local stuckCheckCount       = 0
+
+-- Buff givers to walk into (add more paths here later)
+local BUFF_GIVERS = {
+    { path = {"Map","BuffGivers","ObbyBlessing"}, name = "ObbyBlessing" },
+    -- { path = {"Map","BuffGivers","SomeOtherBuff"}, name = "SomeOtherBuff" },
+}
+local BUFF_CHECK_INTERVAL = 30  -- seconds between buff collection attempts
+local BUFF_TOUCH_DIST     = 3   -- how close to walk before "touching"
+local lastBuffCheck       = 0
+
+local EGG_POINTS = {
+    point_egg_1 = 50,
+    point_egg_2 = 100,
+    point_egg_3 = 150,
+    point_egg_4 = 200,
+    point_egg_5 = 300,
+    point_egg_6 = 500,
+}
+
+local EGG_COLORS = {
+    [1] = Color3.fromRGB(255,255,255),
+    [2] = Color3.fromRGB(0,255,0),
+    [3] = Color3.fromRGB(0,170,255),
+    [4] = Color3.fromRGB(170,0,255),
+    [5] = Color3.fromRGB(255,170,0),
+    [6] = Color3.fromRGB(255,0,0),
+}
+local JUMP_COLOR     = Color3.fromRGB(255,100,0)
+local PRIORITY_COLOR = Color3.fromRGB(255,0,0)
+local POTION_COLOR   = Color3.fromRGB(170,0,255)
+local DEFAULT_COLOR  = Color3.new(1,1,1)
+local GAP_COLOR      = Color3.fromRGB(255,50,50)
+
+local PRIORITY_SET = {
+    andromeda_egg=true, angelic_egg=true, blooming_egg=true, dreamer_egg=true,
+    egg_v2=true, forest_egg=true, hatch_egg=true, royal_egg=true,
+    the_egg_of_the_sky=true,
+    point_egg_1=true, point_egg_2=true, point_egg_3=true,
+    point_egg_4=true, point_egg_5=true, point_egg_6=true,
+    random_potion_egg_1=true, random_potion_egg_2=true,
+}
+
+local BLACKLIST = {}
+local failCounts = {}
+
+-- ─────────────────────────────────────────────────────────────────────
+-- STATE
+-- ─────────────────────────────────────────────────────────────────────
+
+local isWalking    = false
+local eggQueue     = {}
+local queuedIds    = {}
+local lastMoveTick = tick()
+
+local function farmEnabled()   return isRunning() and Features.farmEggs end
+local function buffsEnabled()  return isRunning() and Features.collectBuffs end
+local function setFarm(v)      setRunning(v) end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- HELPERS
+-- ─────────────────────────────────────────────────────────────────────
+
+local function isAlive(inst) return inst ~= nil and inst.Parent ~= nil end
+local function safeGet(fn) local ok,v = pcall(fn) return ok and v or nil end
+local function getChar()  return player.Character end
+local function getHum(c)  return c and c:FindFirstChildOfClass("Humanoid") end
+local function getRoot(c) return c and c:FindFirstChild("HumanoidRootPart") end
+
+local function resolvePos(inst)
+    if not isAlive(inst) then return nil end
+    return safeGet(function()
+        if inst:IsA("BasePart") then return inst.Position end
+        if inst:IsA("Model") then
+            if inst.PrimaryPart then return inst.PrimaryPart.Position end
+            local bp = inst:FindFirstChildWhichIsA("BasePart", true)
+            return bp and bp.Position
+        end
+    end)
+end
+
+local function resolvePath(pathTable)
+    local cur = workspace
+    for _, key in ipairs(pathTable) do
+        cur = cur:FindFirstChild(key)
+        if not cur then return nil end
+    end
+    return cur
+end
+
+local function isGapBelow(position)
+    local rayDir = Vector3.new(0, -(GAP_DEPTH_THRESHOLD + 0.5), 0)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local char = getChar()
+    if char then params.FilterDescendantsInstances = {char} end
+    local offsets = {
+        Vector3.new(0,0.5,0), Vector3.new(0.4,0.5,0), Vector3.new(-0.4,0.5,0),
+        Vector3.new(0,0.5,0.4), Vector3.new(0,0.5,-0.4),
+    }
+    for _, offset in ipairs(offsets) do
+        if workspace:Raycast(position + offset, rayDir, params) then return false end
+    end
+    return true
+end
+
+local function getGapInfo(fromPos, toPos)
+    local horizontalDist = Vector3.new(toPos.X-fromPos.X, 0, toPos.Z-fromPos.Z).Magnitude
+    local midPos = (fromPos + toPos) / 2
+    if not isGapBelow(toPos) and not isGapBelow(midPos) then return nil end
+    if horizontalDist <= MAX_JUMPABLE_GAP then return horizontalDist end
+    return false
+end
+
+local function makePathFolder(waypoints, eggColor)
+    local folder = Instance.new("Folder")
+    folder.Name  = "ActivePath"
+    pcall(function()
+        for i, wp in ipairs(waypoints) do
+            local p = Instance.new("Part")
+            p.Shape       = Enum.PartType.Ball
+            p.Size        = Vector3.new(0.6,0.6,0.6)
+            p.Position    = wp.Position
+            p.Anchored    = true
+            p.CanCollide  = false
+            p.CastShadow  = false
+            p.Transparency = shared.dev and 0 or 1
+            p.Material    = Enum.Material.SmoothPlastic
+            local prevPos = (i > 1) and waypoints[i-1].Position or wp.Position
+            local gapInfo = getGapInfo(prevPos, wp.Position)
+            if gapInfo then p.Color = GAP_COLOR
+            elseif wp.Action == Enum.PathWaypointAction.Jump then p.Color = JUMP_COLOR
+            else p.Color = eggColor end
+            p.Parent = folder
+        end
+    end)
+    folder.Parent = workspace
+    local function cleanup()
+        task.spawn(function() pcall(function() if folder.Parent then folder:Destroy() end end) end)
+    end
+    return folder, cleanup
+end
+
+local function doJump(hum)
+    if hum and hum:GetState() ~= Enum.HumanoidStateType.Jumping and hum:GetState() ~= Enum.HumanoidStateType.Freefall then
+        hum:ChangeState(Enum.HumanoidStateType.Jumping)
+    end
+end
+
+local function doGapJump(hum, root, targetPos)
+    if not hum or not root then return false end
+    local dir = (Vector3.new(targetPos.X, root.Position.Y, targetPos.Z) - root.Position).Unit
+    if PARKOUR_JUMP_BOOST then
+        hum:MoveTo(root.Position + dir * 1.5)
+        task.wait(0.08)
+    end
+    doJump(hum)
+    hum:MoveTo(targetPos)
+    local t0 = tick()
+    while tick() - t0 < 2.5 do
+        task.wait()
+        local state = hum:GetState()
+        if state ~= Enum.HumanoidStateType.Jumping and state ~= Enum.HumanoidStateType.Freefall then return true end
+        hum:MoveTo(targetPos)
+    end
+    return false
+end
+
+local function respawnAndWait()
+    local humanoid = getHum(getChar())
+    if humanoid then humanoid.Health = 0 end
+    task.wait(0.5)
+    local t0 = tick()
+    while tick() - t0 < 10 do
+        local c = getChar()
+        local hum = getHum(c)
+        local root = getRoot(c)
+        if c and hum and root and hum.Health > 0 then break end
+        task.wait(0.2)
+    end
+    task.wait(0.3)
+end
+
+local function findLadderNear(root)
+    local nearby = workspace:GetPartBoundsInBox(CFrame.new(root.Position), Vector3.new(4,6,4))
+    for _, part in ipairs(nearby) do
+        if part:IsA("BasePart") and not part:IsA("TrussPart") and string.find(part.Name:lower(), "ladder") then
+            return part
+        end
+    end
+    return nil
+end
+
+local function climbLadder(hum, root, ladder)
+    local topY   = ladder.Position.Y + ladder.Size.Y / 2 + 3
+    local topPos = Vector3.new(ladder.Position.X, topY, ladder.Position.Z)
+    hum:MoveTo(Vector3.new(ladder.Position.X, root.Position.Y, ladder.Position.Z))
+    task.wait(0.3)
+    local t0 = tick()
+    local lastY, stuckT = root.Position.Y, tick()
+    while tick() - t0 < 10 do
+        task.wait(0.1)
+        if root.Position.Y >= topY - 1.5 then return true end
+        hum:MoveTo(topPos)
+        if root.Position.Y > lastY + 0.1 then lastY = root.Position.Y stuckT = tick()
+        elseif tick() - stuckT > 2 then return false end
+    end
+    return false
+end
+
+local function stepToWaypoint(hum, root, wp, prevPos)
+    if not hum or not root then return "fail" end
+    local fromPos = prevPos or root.Position
+    local gapInfo = getGapInfo(fromPos, wp.Position)
+    if gapInfo == false then return "gaptoowide"
+    elseif gapInfo then
+        return doGapJump(hum, root, wp.Position) and "reached" or "gapfail"
+    end
+
+    hum:MoveTo(wp.Position)
+    local result, startT = nil, tick()
+    local lastPos, lastPosTime = root.Position, tick()
+    local PROGRESS_CHECK_INTERVAL, MIN_PROGRESS = 0.6, 0.8
+
+    local moveConn = hum.MoveToFinished:Connect(function(reached)
+        if result == nil then result = reached and "reached" or "timeout" end
+    end)
+
+    while result == nil do
+        task.wait()
+        if not farmEnabled() then result = "stopped" break end
+        if tick() - startT > WAYPOINT_TIMEOUT then result = "timeout" break end
+        if (root.Position - wp.Position).Magnitude < REACH_DIST then
+            result = "reached" lastMoveTick = tick() stuckCheckCount = 0 break
+        end
+
+        local now = tick()
+        if now - lastPosTime > PROGRESS_CHECK_INTERVAL then
+            local moved = (root.Position - lastPos).Magnitude
+            if moved < MIN_PROGRESS then
+                stuckCheckCount += 1
+                warn("[EggBot] Stuck check " .. stuckCheckCount .. "/" .. STUCK_RESET_THRESHOLD)
+                if stuckCheckCount >= STUCK_RESET_THRESHOLD then
+                    stuckCheckCount = 0
+                    moveConn:Disconnect()
+                    respawnAndWait()
+                    return "stuck_reset"
+                end
+                local ladder = findLadderNear(root)
+                if ladder then
+                    moveConn:Disconnect()
+                    result = climbLadder(hum, root, ladder) and "reached" or "timeout"
+                    break
+                end
+                local surpriseGap = getGapInfo(root.Position, root.Position + (wp.Position - root.Position).Unit * 3)
+                if surpriseGap and surpriseGap ~= false then
+                    if doGapJump(hum, root, wp.Position) then stuckCheckCount = 0 result = "reached" break end
+                else
+                    local awayDir = (root.Position - wp.Position).Unit
+                    hum:MoveTo(root.Position + Vector3.new(awayDir.X*3, 0, awayDir.Z*3))
+                    task.wait(0.4)
+                    doJump(hum) task.wait(0.05)
+                    hum:MoveTo(wp.Position)
+                end
+            else
+                stuckCheckCount = 0
+            end
+            lastPos = root.Position lastPosTime = now
+        end
+    end
+
+    moveConn:Disconnect()
+    return result
+end
+
+local lastRescan = 0
+local function rescanWorkspace()
+    if tick() - lastRescan < 1 then return end
+    lastRescan = tick()
+    for _, v in ipairs(workspace:GetChildren()) do checkEgg(v) end
+end
+
+local function pathHasGap(waypoints)
+    for i = 2, #waypoints do
+        if getGapInfo(waypoints[i-1].Position, waypoints[i].Position) ~= nil then return true end
+    end
+    return false
+end
+
+local function computeSafePath(fromPos, toPos, extraRadius)
+    local params = {
+        AgentHeight     = PATH_PARAMS.AgentHeight,
+        AgentRadius     = PATH_PARAMS.AgentRadius + (extraRadius or 0),
+        AgentCanJump    = PATH_PARAMS.AgentCanJump,
+        AgentJumpHeight = PATH_PARAMS.AgentJumpHeight,
+        WaypointSpacing = PATH_PARAMS.WaypointSpacing,
+    }
+    local path = PathfindingService:CreatePath(params)
+    local ok = pcall(function() path:ComputeAsync(fromPos, toPos) end)
+    if not ok or path.Status ~= Enum.PathStatus.Success then return nil end
+    return path
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- BUFF COLLECTION
+-- ─────────────────────────────────────────────────────────────────────
+
+local function collectBuffs()
+    if not buffsEnabled() then return end
+    local char = getChar()
+    local hum  = getHum(char)
+    local root = getRoot(char)
+    if not hum or not root then return end
+
+    for _, buffDef in ipairs(BUFF_GIVERS) do
+        if not buffsEnabled() then break end
+        local buffPart = resolvePath(buffDef.path)
+        if not buffPart then
+            warn("[EggBot] BuffGiver not found: " .. buffDef.name)
+            continue
+        end
+
+        local buffPos = resolvePos(buffPart)
+        if not buffPos then continue end
+
+        local dist = (root.Position - buffPos).Magnitude
+        warn("[EggBot] Walking to buff: " .. buffDef.name .. " (dist: " .. math.floor(dist) .. ")")
+
+        -- Walk to the buff using pathfinding
+        for attempt = 1, 3 do
+            local path = computeSafePath(root.Position, buffPos, 0)
+            if not path then task.wait(0.2) continue end
+
+            local waypoints = path:GetWaypoints()
+            local broken = false
+
+            for i, wp in ipairs(waypoints) do
+                if not buffsEnabled() then broken = true break end
+                local prevPos = (i > 1) and waypoints[i-1].Position or root.Position
+                if wp.Action == Enum.PathWaypointAction.Jump then doJump(hum) end
+                local stepResult = stepToWaypoint(hum, root, wp, prevPos)
+                if stepResult ~= "reached" then broken = true break end
+
+                -- Check if close enough to "touch" the buff
+                local currentDist = (root.Position - buffPos).Magnitude
+                if currentDist <= BUFF_TOUCH_DIST then
+                    warn("[EggBot] Touched buff: " .. buffDef.name)
+                    broken = false
+                    break
+                end
+            end
+
+            if not broken then break end
+            task.wait(0.2)
+        end
+    end
+
+    lastBuffCheck = tick()
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- EGG WALKING
+-- ─────────────────────────────────────────────────────────────────────
+
+local function walkToEgg(targetInstance, eggColor)
+    local char = getChar()
+    local hum  = getHum(char)
+    local root = getRoot(char)
+    if not hum or not root then return "fail" end
+
+    -- Check if we should collect buffs first (nearby check)
+    if buffsEnabled() and tick() - lastBuffCheck >= BUFF_CHECK_INTERVAL then
+        for _, buffDef in ipairs(BUFF_GIVERS) do
+            local buffPart = resolvePath(buffDef.path)
+            if buffPart then
+                local buffPos = resolvePos(buffPart)
+                if buffPos then
+                    local dist = (root.Position - buffPos).Magnitude
+                    if dist < 60 then -- only detour if reasonably close
+                        collectBuffs()
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    for attempt = 1, MAX_PATH_ATTEMPTS do
+        if not farmEnabled() then return "stopped" end
+        local targetPos = resolvePos(targetInstance)
+        if not targetPos then return "done" end
+
+        local waypoints = nil
+        for _, extraRadius in ipairs({0,2,4,6,8}) do
+            local candidate = computeSafePath(root.Position, targetPos, extraRadius)
+            if candidate then
+                local wps = candidate:GetWaypoints()
+                if not pathHasGap(wps) then
+                    waypoints = wps
+                    if extraRadius > 0 then warn("[EggBot] Gap-free path found with radius +" .. extraRadius) end
+                    break
+                end
+            end
+        end
+
+        if not waypoints then
+            warn("[EggBot] No gap-free path on attempt " .. attempt)
+            task.wait(0.2) continue
+        end
+
+        local pathFolder, cleanup = makePathFolder(waypoints, eggColor)
+        local pathBroken = false
+
+        for i, wp in ipairs(waypoints) do
+            if not farmEnabled() or not isAlive(targetInstance) then pathBroken = true break end
+            local prevPos = (i > 1) and waypoints[i-1].Position or root.Position
+            if wp.Action == Enum.PathWaypointAction.Jump then doJump(hum) end
+            local stepResult = stepToWaypoint(hum, root, wp, prevPos)
+            if stepResult == "stuck_reset" then pathBroken = true break
+            elseif stepResult == "gaptoowide" or stepResult == "gapfail" then pathBroken = true break
+            elseif stepResult ~= "reached" then pathBroken = true break
+            end
+        end
+
+        cleanup()
+        if not farmEnabled() then return "stopped" end
+        if pathBroken then task.wait(0.1) continue end
+
+        local collected = false
+        if isAlive(targetInstance) then
+            for _, v in ipairs(targetInstance:GetDescendants()) do
+                if v:IsA("ProximityPrompt") then
+                    task.wait(0.5)
+                    fireproximityprompt(v)
+                    collected = true
+                end
+            end
+        end
+        task.wait(0.1)
+
+        if collected then
+            local eggName = targetInstance.Name
+            local points  = EGG_POINTS[eggName]
+            if points then
+                totalPoints += points
+                shared.totalPoints = totalPoints
+                saveStats()
+                warn("[EggBot] Collected " .. eggName .. " +" .. points .. " pts (total: " .. totalPoints .. ")")
+            end
+            rescanWorkspace()
+        end
+
+        return "done"
+    end
+    return "fail"
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- QUEUE
+-- ─────────────────────────────────────────────────────────────────────
+
+local function pruneQueue()
+    local alive = {}
+    for _, e in ipairs(eggQueue) do
+        if isAlive(e.target) then table.insert(alive, e) else queuedIds[e.id] = nil end
+    end
+    eggQueue = alive
+end
+
+local function releaseWalking() isWalking = false end
+
+local function processQueue()
+    if not farmEnabled() or isWalking or #eggQueue == 0 then return end
+    isWalking = true
+    task.spawn(function()
+        local hardTimer = task.delay(WALK_HARD_TIMEOUT, function() releaseWalking() end)
+        pruneQueue()
+        local data = table.remove(eggQueue, 1)
+        if data and queuedIds[data.id] then
+            queuedIds[data.id] = nil
+            if isAlive(data.target) and farmEnabled() then
+                respawnAndWait()
+                local result = walkToEgg(data.target, data.color)
+                if result == "fail" then
+                    failCounts[data.id] = (failCounts[data.id] or 0) + 1
+                    if failCounts[data.id] >= 3 then
+                        warn("[EggBot] Auto-blacklisting " .. data.id)
+                        BLACKLIST[data.target.Name] = true
+                    end
+                end
+            end
+        end
+        task.cancel(hardTimer)
+        releaseWalking()
+        if farmEnabled() then task.wait(QUEUE_COOLDOWN) processQueue() end
+    end)
+end
+
+function checkEgg(v)
+    task.spawn(function()
+        if not v or not (v:IsA("Model") or v:IsA("BasePart")) then return end
+        task.wait(0.1)
+        if not isAlive(v) then return end
+        local name = v.Name
+        if BLACKLIST[name] then return end
+        local uid = name .. tostring(v)
+        if queuedIds[uid] then return end
+
+        local eggNum     = tonumber(string.match(name, "egg_(%d+)$"))
+        local isPriority = PRIORITY_SET[name] == true
+        local isPotion   = string.find(name, "potion", 1, true) ~= nil
+        local eggColor
+
+        if isPriority then eggColor = PRIORITY_COLOR
+        elseif isPotion then eggColor = POTION_COLOR
+        elseif eggNum then eggColor = EGG_COLORS[eggNum] or DEFAULT_COLOR
+        else return end
+
+        local hasPrompt = false
+        for _, d in ipairs(v:GetDescendants()) do
+            if d:IsA("ProximityPrompt") then hasPrompt = true break end
+        end
+        if not hasPrompt then return end
+
+        queuedIds[uid] = true
+        table.insert(eggQueue, isPriority and 1 or #eggQueue + 1, { target=v, color=eggColor, id=uid })
+        if farmEnabled() then processQueue() end
+    end)
+end
+
+-- CharacterAdded handler so queue resumes after respawn/rejoin
+player.CharacterAdded:Connect(function()
+    task.wait(1)
+    stuckCheckCount = 0
+    isWalking = false
+    if isRunning() then processQueue() end
+end)
+
+-- ─────────────────────────────────────────────────────────────────────
+-- AFK ANTI-KICK
+-- ─────────────────────────────────────────────────────────────────────
+
+task.spawn(function()
+    while true do
+        task.wait(55)
+        if isRunning() then
+            local cam = workspace.CurrentCamera
+            if cam then cam.CFrame = cam.CFrame * CFrame.Angles(0, 0.001, 0) end
+        end
+    end
+end)
+
+-- ─────────────────────────────────────────────────────────────────────
+-- UI
+-- ─────────────────────────────────────────────────────────────────────
+
+-- Remove old UI if re-executing
+local oldGui = playerGui:FindFirstChild("EggBotUI")
+if oldGui then oldGui:Destroy() end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name         = "EggBotUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent       = playerGui
+
+-- ── Small toggle button (always visible) ──────────────────────────────
+
+local HUDButton = Instance.new("TextButton")
+HUDButton.Name            = "HUDButton"
+HUDButton.Size            = UDim2.new(0, 90, 0, 28)
+HUDButton.Position        = UDim2.new(1, -100, 0, 10)
+HUDButton.AnchorPoint     = Vector2.new(0, 0)
+HUDButton.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+HUDButton.TextColor3      = Color3.fromRGB(220, 220, 220)
+HUDButton.TextScaled      = true
+HUDButton.Font            = Enum.Font.SourceSansBold
+HUDButton.Text            = "⚙ EggBot"
+HUDButton.BorderSizePixel = 0
+HUDButton.ZIndex          = 10
+HUDButton.Parent          = ScreenGui
+
+local HUDCorner = Instance.new("UICorner")
+HUDCorner.CornerRadius = UDim.new(0, 6)
+HUDCorner.Parent = HUDButton
+
+-- ── Settings Panel ────────────────────────────────────────────────────
+
+local Panel = Instance.new("Frame")
+Panel.Name              = "SettingsPanel"
+Panel.Size              = UDim2.new(0, 240, 0, 320)
+Panel.Position          = UDim2.new(1, -250, 0, 44)
+Panel.BackgroundColor3  = Color3.fromRGB(14, 14, 14)
+Panel.BorderSizePixel   = 0
+Panel.Visible           = false
+Panel.ZIndex            = 9
+Panel.Active            = true
+Panel.Parent            = ScreenGui
+
+local PanelCorner = Instance.new("UICorner")
+PanelCorner.CornerRadius = UDim.new(0, 8)
+PanelCorner.Parent = Panel
+
+local PanelStroke = Instance.new("UIStroke")
+PanelStroke.Color     = Color3.fromRGB(45, 45, 45)
+PanelStroke.Thickness = 1
+PanelStroke.Parent    = Panel
+
+-- Panel title bar (used for dragging)
+local TitleBar = Instance.new("TextLabel")
+TitleBar.Name              = "TitleBar"
+TitleBar.Size              = UDim2.new(1, 0, 0, 32)
+TitleBar.Position          = UDim2.new(0, 0, 0, 0)
+TitleBar.BackgroundColor3  = Color3.fromRGB(22, 22, 22)
+TitleBar.BorderSizePixel   = 0
+TitleBar.TextColor3        = Color3.fromRGB(200, 200, 200)
+TitleBar.TextScaled        = true
+TitleBar.Font              = Enum.Font.SourceSansBold
+TitleBar.Text              = "EggBot  v3.0.0"
+TitleBar.ZIndex            = 10
+TitleBar.Active            = true
+TitleBar.Parent            = Panel
+
+local TitleCorner = Instance.new("UICorner")
+TitleCorner.CornerRadius = UDim.new(0, 8)
+TitleCorner.Parent = TitleBar
+
+-- Scrolling frame for content
+local ScrollFrame = Instance.new("ScrollingFrame")
+ScrollFrame.Size              = UDim2.new(1, 0, 1, -32)
+ScrollFrame.Position          = UDim2.new(0, 0, 0, 32)
+ScrollFrame.BackgroundTransparency = 1
+ScrollFrame.BorderSizePixel   = 0
+ScrollFrame.ScrollBarThickness = 3
+ScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(60,60,60)
+ScrollFrame.CanvasSize        = UDim2.new(0, 0, 0, 0) -- auto-set below
+ScrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ScrollFrame.ZIndex            = 10
+ScrollFrame.Parent            = Panel
+
+local ListLayout = Instance.new("UIListLayout")
+ListLayout.SortOrder    = Enum.SortOrder.LayoutOrder
+ListLayout.Padding      = UDim.new(0, 0)
+ListLayout.Parent       = ScrollFrame
+
+local ListPadding = Instance.new("UIPadding")
+ListPadding.PaddingLeft   = UDim.new(0, 12)
+ListPadding.PaddingRight  = UDim.new(0, 12)
+ListPadding.PaddingTop    = UDim.new(0, 8)
+ListPadding.PaddingBottom = UDim.new(0, 8)
+ListPadding.Parent        = ScrollFrame
+
+-- ── UI Helper: Section label ──────────────────────────────────────────
+
+local function makeSectionLabel(text, order)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size              = UDim2.new(1, 0, 0, 22)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3        = Color3.fromRGB(100, 100, 100)
+    lbl.TextScaled        = true
+    lbl.Font              = Enum.Font.SourceSansBold
+    lbl.Text              = text:upper()
+    lbl.TextXAlignment    = Enum.TextXAlignment.Left
+    lbl.LayoutOrder       = order
+    lbl.ZIndex            = 11
+    lbl.Parent            = ScrollFrame
+    return lbl
+end
+
+-- ── UI Helper: Toggle row ─────────────────────────────────────────────
+
+local function makeToggleRow(labelText, initState, order, onToggle)
+    local row = Instance.new("Frame")
+    row.Size              = UDim2.new(1, 0, 0, 34)
+    row.BackgroundTransparency = 1
+    row.LayoutOrder       = order
+    row.ZIndex            = 11
+    row.Parent            = ScrollFrame
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size           = UDim2.new(1, -50, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3     = Color3.fromRGB(210, 210, 210)
+    lbl.TextScaled     = true
+    lbl.Font           = Enum.Font.SourceSans
+    lbl.Text           = labelText
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.ZIndex         = 11
+    lbl.Parent         = row
+
+    local btn = Instance.new("TextButton")
+    btn.Size              = UDim2.new(0, 42, 0, 22)
+    btn.Position          = UDim2.new(1, -42, 0.5, -11)
+    btn.Font              = Enum.Font.SourceSansBold
+    btn.TextScaled        = true
+    btn.BorderSizePixel   = 0
+    btn.ZIndex            = 12
+    btn.Parent            = row
+
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 11)
+    btnCorner.Parent = btn
+
+    local function refreshBtn(state)
+        btn.Text              = state and "ON" or "OFF"
+        btn.BackgroundColor3  = state and Color3.fromRGB(30,120,30) or Color3.fromRGB(100,25,25)
+        btn.TextColor3        = Color3.fromRGB(220,220,220)
+    end
+
+    refreshBtn(initState)
+
+    btn.MouseButton1Click:Connect(function()
+        local newState = onToggle()
+        refreshBtn(newState)
+    end)
+
+    return row, refreshBtn
+end
+
+-- ── UI Helper: Stat row ───────────────────────────────────────────────
+
+local function makeStatRow(labelText, order)
+    local row = Instance.new("Frame")
+    row.Size              = UDim2.new(1, 0, 0, 28)
+    row.BackgroundTransparency = 1
+    row.LayoutOrder       = order
+    row.ZIndex            = 11
+    row.Parent            = ScrollFrame
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size           = UDim2.new(0.5, 0, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3     = Color3.fromRGB(130,130,130)
+    lbl.TextScaled     = true
+    lbl.Font           = Enum.Font.SourceSans
+    lbl.Text           = labelText
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.ZIndex         = 11
+    lbl.Parent         = row
+
+    local val = Instance.new("TextLabel")
+    val.Size           = UDim2.new(0.5, 0, 1, 0)
+    val.Position       = UDim2.new(0.5, 0, 0, 0)
+    val.BackgroundTransparency = 1
+    val.TextColor3     = Color3.fromRGB(220,220,220)
+    val.TextScaled     = true
+    val.Font           = Enum.Font.SourceSansBold
+    val.Text           = "—"
+    val.TextXAlignment = Enum.TextXAlignment.Right
+    val.ZIndex         = 11
+    val.Parent         = row
+
+    return val
+end
+
+-- ── Divider ───────────────────────────────────────────────────────────
+
+local function makeDivider(order)
+    local d = Instance.new("Frame")
+    d.Size             = UDim2.new(1, 0, 0, 1)
+    d.BackgroundColor3 = Color3.fromRGB(35,35,35)
+    d.BorderSizePixel  = 0
+    d.LayoutOrder      = order
+    d.ZIndex           = 11
+    d.Parent           = ScrollFrame
+end
+
+-- ── Build panel content ───────────────────────────────────────────────
+
+makeSectionLabel("Status", 1)
+
+local botRunVal
+local _, botRunRefresh = makeToggleRow("Bot Running", isRunning(), 2, function()
+    local newState = not isRunning()
+    setRunning(newState)
+    if newState then
+        processQueue()
+        warn("[EggBot] Manually turned ON")
+    else
+        warn("[EggBot] Manually turned OFF")
+    end
+    return newState
+end)
+
+makeDivider(3)
+makeSectionLabel("Features", 4)
+
+makeToggleRow("Farm Eggs", Features.farmEggs, 5, function()
+    Features.farmEggs = not Features.farmEggs
+    if Features.farmEggs then processQueue() end
+    return Features.farmEggs
+end)
+
+makeToggleRow("Collect Buffs", Features.collectBuffs, 6, function()
+    Features.collectBuffs = not Features.collectBuffs
+    return Features.collectBuffs
+end)
+
+makeDivider(7)
+makeSectionLabel("Stats", 8)
+
+local timeVal   = makeStatRow("Session Time", 9)
+local pointsVal = makeStatRow("Points", 10)
+local queueVal  = makeStatRow("Queue Size", 11)
+local pphVal    = makeStatRow("Pts / Hour", 12)
+
+makeDivider(13)
+makeSectionLabel("Queue", 14)
+
+-- Queue list label
+local queueListLbl = Instance.new("TextLabel")
+queueListLbl.Size              = UDim2.new(1, 0, 0, 20)
+queueListLbl.BackgroundTransparency = 1
+queueListLbl.TextColor3        = Color3.fromRGB(100,100,100)
+queueListLbl.TextScaled        = true
+queueListLbl.Font              = Enum.Font.SourceSans
+queueListLbl.Text              = "No eggs queued"
+queueListLbl.TextXAlignment    = Enum.TextXAlignment.Left
+queueListLbl.LayoutOrder       = 15
+queueListLbl.ZIndex            = 11
+queueListLbl.Parent            = ScrollFrame
+
+-- ── Stats update loop ─────────────────────────────────────────────────
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        local elapsed = math.floor(tick() - startTime)
+        local pph     = math.floor((totalPoints / math.max(1, elapsed)) * 3600)
+        local mins    = math.floor(elapsed / 60)
+        local secs    = elapsed % 60
+
+        timeVal.Text   = string.format("%dm %02ds", mins, secs)
+        pointsVal.Text = tostring(totalPoints)
+        queueVal.Text  = tostring(#eggQueue)
+        pphVal.Text    = tostring(pph)
+
+        -- Update queue list label with first few egg names
+        if #eggQueue == 0 then
+            queueListLbl.Text = "No eggs queued"
+        else
+            local names = {}
+            for i = 1, math.min(3, #eggQueue) do
+                table.insert(names, eggQueue[i].target.Name)
+            end
+            if #eggQueue > 3 then table.insert(names, "... +" .. (#eggQueue - 3) .. " more") end
+            queueListLbl.Text = table.concat(names, "\n")
+        end
+
+        -- Resize queue label to fit content
+        queueListLbl.Size = UDim2.new(1, 0, 0, math.max(20, #eggQueue == 0 and 20 or math.min(#eggQueue, 3) * 20 + (#eggQueue > 3 and 20 or 0)))
+    end
+end)
+
+-- ── Panel toggle ──────────────────────────────────────────────────────
+
+HUDButton.MouseButton1Click:Connect(function()
+    Panel.Visible = not Panel.Visible
+end)
+
+-- ── Panel dragging (drag via title bar) ──────────────────────────────
+
+local panelDragging, panelDragStart, panelStartPos
+
+TitleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        panelDragging  = true
+        panelDragStart = input.Position
+        panelStartPos  = Panel.Position
+    end
+end)
+
+TitleBar.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        panelDragging = false
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if panelDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - panelDragStart
+        Panel.Position = UDim2.new(
+            panelStartPos.X.Scale,
+            panelStartPos.X.Offset + delta.X,
+            panelStartPos.Y.Scale,
+            panelStartPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+-- ── HUD button dragging ───────────────────────────────────────────────
+
+local hudDragging, hudDragStart, hudStartPos, didDrag
+
+HUDButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        hudDragging  = true
+        didDrag      = false
+        hudDragStart = input.Position
+        hudStartPos  = HUDButton.Position
+    end
+end)
+
+HUDButton.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        hudDragging = false
+        -- If we dragged, suppress the click toggle
+        if didDrag then didDrag = false end
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if hudDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - hudDragStart
+        if delta.Magnitude > 4 then didDrag = true end
+        HUDButton.Position = UDim2.new(
+            hudStartPos.X.Scale,
+            hudStartPos.X.Offset + delta.X,
+            hudStartPos.Y.Scale,
+            hudStartPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+-- ─────────────────────────────────────────────────────────────────────
+-- AUTOSTART
+-- ─────────────────────────────────────────────────────────────────────
+
+setRunning(true)
+lastMoveTick = tick()
+
+for _, v in ipairs(workspace:GetChildren()) do checkEgg(v) end
+workspace.ChildAdded:Connect(checkEgg)
+processQueue()
+
+-- Initial buff collection
+task.delay(3, function()
+    if buffsEnabled() then collectBuffs() end
+end)
+
+print("[EggBot] Bot Loaded - v3.0.0")

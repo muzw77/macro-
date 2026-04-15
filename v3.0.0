@@ -1,5 +1,5 @@
 -- MADE BY Muzw :D
--- v3.1.0 - Buff/clover timing overhaul, pause eggs during buff runs
+-- v3.2.0 - Smart AI: distance+rarity sorting, priority interrupt, buff cooldown fix
 
 -- ─────────────────────────────────────────────────────────────────────
 -- GAME ID LOCK
@@ -112,9 +112,11 @@ setRunning(true)
 -- ─────────────────────────────────────────────────────────────────────
 
 local Features = {
-    farmEggs     = true,
-    collectBuffs = true,
+    farmEggs      = true,
+    collectBuffs  = true,
     collectClover = true,
+    smartSort     = true,   -- distance+rarity combined sorting
+    autoSwitch    = true,   -- interrupt path for priority eggs
 }
 
 -- ─────────────────────────────────────────────────────────────────────
@@ -180,9 +182,14 @@ local PARKOUR_JUMP_BOOST    = true
 local STUCK_RESET_THRESHOLD = 4
 local stuckCheckCount       = 0
 
+-- Smart sort re-sort interval (seconds)
+local SORT_INTERVAL         = 4
+
+-- Priority interrupt: only interrupt current walk if a priority egg
+-- spawns closer than this distance to the player
+local INTERRUPT_MAX_DIST    = 80
+
 -- ── Buff / Clover timing ──────────────────────────────────────────────
--- ObbyBlessing: try every 2 min, max 3 attempts before skipping
--- Clover:       collect every 4 min
 local BUFF_INTERVAL         = 120   -- 2 minutes
 local BUFF_MAX_ATTEMPTS     = 3
 local CLOVER_INTERVAL       = 240   -- 4 minutes
@@ -191,17 +198,49 @@ local CLOVER_TOUCH_DIST     = 3
 
 local lastBuffTime          = 0
 local lastCloverTime        = 0
-local isCollectingPickup    = false  -- true while bot is doing a buff/clover run (pauses eggs)
+local isCollectingPickup    = false
 
--- Buff givers (ObbyBlessing path in workspace)
 local BUFF_GIVERS = {
     { path = {"Map","BuffGivers","ObbyBlessing"}, name = "ObbyBlessing" },
-    -- add more here later: { path = {"Map","BuffGivers","XYZ"}, name = "XYZ" },
 }
 
--- Clover: search workspace for a Model/Part named "clover" (case-insensitive)
--- Update CLOVER_NAME if the actual name differs
 local CLOVER_NAME = "clover"
+
+-- ── Egg rarity scores (higher = rarer/more valuable) ─────────────────
+-- Used in combined distance+rarity sorting.
+-- Priority eggs get the highest score so they always bubble near the top.
+-- Point eggs are scored by their point value.
+-- Normal numbered eggs are scored by tier.
+local RARITY_SCORE = {
+    -- Priority / special eggs  (score 1000+)
+    andromeda_egg       = 1500,
+    the_egg_of_the_sky  = 1400,
+    royal_egg           = 1300,
+    angelic_egg         = 1200,
+    blooming_egg        = 1100,
+    dreamer_egg         = 1050,
+    forest_egg          = 1000,
+    hatch_egg           = 1000,
+    egg_v2              = 1000,
+    -- Point eggs scored by value
+    point_egg_6         = 900,
+    point_egg_5         = 700,
+    point_egg_4         = 500,
+    point_egg_3         = 350,
+    point_egg_2         = 200,
+    point_egg_1         = 100,
+    -- Potions
+    random_potion_egg_1 = 800,
+    random_potion_egg_2 = 800,
+}
+
+-- Numbered eggs (egg_1 … egg_6) get score = tier * 60
+local function rarityScoreForName(name)
+    if RARITY_SCORE[name] then return RARITY_SCORE[name] end
+    local tier = tonumber(string.match(name, "egg_(%d+)$"))
+    if tier then return tier * 60 end
+    return 0
+end
 
 local EGG_POINTS = {
     point_egg_1 = 50,
@@ -242,15 +281,16 @@ local failCounts = {}
 -- STATE
 -- ─────────────────────────────────────────────────────────────────────
 
-local isWalking    = false
-local eggQueue     = {}
-local queuedIds    = {}
-local lastMoveTick = tick()
+local isWalking         = false
+local eggQueue          = {}
+local queuedIds         = {}
+local lastMoveTick      = tick()
+local currentTarget     = nil   -- { target, color, id } of egg being walked to
+local interruptWalk     = false -- set true to abort current egg walk for priority egg
 
-local function farmEnabled()    return isRunning() and Features.farmEggs and not isCollectingPickup end
-local function buffsEnabled()   return isRunning() and Features.collectBuffs end
-local function cloverEnabled()  return isRunning() and Features.collectClover end
-local function setFarm(v)       setRunning(v) end
+local function farmEnabled()   return isRunning() and Features.farmEggs and not isCollectingPickup end
+local function buffsEnabled()  return isRunning() and Features.collectBuffs end
+local function cloverEnabled() return isRunning() and Features.collectClover end
 
 -- ─────────────────────────────────────────────────────────────────────
 -- HELPERS
@@ -285,12 +325,60 @@ end
 
 local function findClover()
     for _, v in ipairs(workspace:GetDescendants()) do
-        if v.Name:lower() == CLOVER_NAME and (v:IsA("Model") or v:IsA("BasePart")) then
+        if string.find(v.Name:lower(), CLOVER_NAME) and (v:IsA("Model") or v:IsA("BasePart")) then
             return v
         end
     end
     return nil
 end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- SMART SORTING
+-- ─────────────────────────────────────────────────────────────────────
+
+-- Combined score: higher is better (goes to front of queue).
+-- Balance weight 0.5/0.5: rarity score normalized 0-1 vs distance penalty 0-1.
+-- Max rarity reference = 1500 (andromeda), max expected dist = 500 studs.
+local MAX_RARITY_REF = 1500
+local MAX_DIST_REF   = 500
+
+local function eggScore(entry, fromPos)
+    if not isAlive(entry.target) then return -math.huge end
+    local pos = resolvePos(entry.target)
+    if not pos then return -math.huge end
+
+    local dist      = (fromPos - pos).Magnitude
+    local rarity    = rarityScoreForName(entry.target.Name)
+
+    -- Normalize both 0-1, then combine 50/50
+    local rarityNorm = math.min(rarity / MAX_RARITY_REF, 1)
+    local distNorm   = 1 - math.min(dist / MAX_DIST_REF, 1)  -- closer = higher score
+
+    return rarityNorm * 0.5 + distNorm * 0.5
+end
+
+local function smartSortQueue()
+    if not Features.smartSort then return end
+    local root = getRoot(getChar())
+    if not root then return end
+    local fromPos = root.Position
+
+    table.sort(eggQueue, function(a, b)
+        return eggScore(a, fromPos) > eggScore(b, fromPos)
+    end)
+end
+
+-- Periodic re-sort while walking
+local lastSortTime = 0
+local function maybeSortQueue()
+    if tick() - lastSortTime < SORT_INTERVAL then return end
+    lastSortTime = tick()
+    smartSortQueue()
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- GAP DETECTION
+-- ─────────────────────────────────────────────────────────────────────
 
 local function isGapBelow(position)
     local rayDir = Vector3.new(0, -(GAP_DEPTH_THRESHOLD + 0.5), 0)
@@ -315,6 +403,10 @@ local function getGapInfo(fromPos, toPos)
     if horizontalDist <= MAX_JUMPABLE_GAP then return horizontalDist end
     return false
 end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- PATH VISUALS
+-- ─────────────────────────────────────────────────────────────────────
 
 local function makePathFolder(waypoints, color)
     local folder = Instance.new("Folder")
@@ -344,6 +436,10 @@ local function makePathFolder(waypoints, color)
     end
     return folder, cleanup
 end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- MOVEMENT PRIMITIVES
+-- ─────────────────────────────────────────────────────────────────────
 
 local function doJump(hum)
     if hum
@@ -440,7 +536,7 @@ local function computeSafePath(fromPos, toPos, extraRadius)
 end
 
 -- ─────────────────────────────────────────────────────────────────────
--- STEP TO WAYPOINT  (shared by eggs, buffs, and clover)
+-- STEP TO WAYPOINT
 -- ─────────────────────────────────────────────────────────────────────
 
 local function stepToWaypoint(hum, root, wp, prevPos)
@@ -463,7 +559,7 @@ local function stepToWaypoint(hum, root, wp, prevPos)
 
     while result == nil do
         task.wait()
-        if not isRunning() then result = "stopped" break end
+        if not isRunning() or interruptWalk then result = "interrupted" break end
         if tick() - startT > WAYPOINT_TIMEOUT then result = "timeout" break end
         if (root.Position - wp.Position).Magnitude < REACH_DIST then
             result = "reached" lastMoveTick = tick() stuckCheckCount = 0 break
@@ -509,8 +605,7 @@ local function stepToWaypoint(hum, root, wp, prevPos)
 end
 
 -- ─────────────────────────────────────────────────────────────────────
--- GENERIC WALK-TO  (used for both buffs and clover)
--- Returns true if touched, false if all attempts failed
+-- GENERIC WALK-TO  (buffs + clover)
 -- ─────────────────────────────────────────────────────────────────────
 
 local function walkToTarget(targetInst, touchDist, label, maxAttempts)
@@ -548,7 +643,6 @@ local function walkToTarget(targetInst, touchDist, label, maxAttempts)
             local stepResult = stepToWaypoint(hum, root, wp, prevPos)
             if stepResult ~= "reached" then broken = true break end
 
-            -- close enough = touched
             if (root.Position - targetPos).Magnitude <= touchDist then
                 warn("[EggBot] Touched: " .. label)
                 return true
@@ -556,7 +650,6 @@ local function walkToTarget(targetInst, touchDist, label, maxAttempts)
         end
 
         if not broken then
-            -- finished all waypoints — do a final distance check
             local finalPos = resolvePos(targetInst)
             if finalPos and (root.Position - finalPos).Magnitude <= touchDist + 2 then
                 warn("[EggBot] Touched (end of path): " .. label)
@@ -573,7 +666,8 @@ local function walkToTarget(targetInst, touchDist, label, maxAttempts)
 end
 
 -- ─────────────────────────────────────────────────────────────────────
--- BUFF COLLECTION  (ObbyBlessing, every 2 min, 3 tries)
+-- BUFF COLLECTION  (every 2 min, 3 tries)
+-- FIX: cooldown only resets on SUCCESS so it retries quickly on fail
 -- ─────────────────────────────────────────────────────────────────────
 
 local function runBuffCollection()
@@ -581,7 +675,7 @@ local function runBuffCollection()
     if isCollectingPickup then return end
 
     isCollectingPickup = true
-    warn("[EggBot] Starting buff collection run (pausing eggs)")
+    warn("[EggBot] Starting buff run (pausing eggs)")
 
     for _, buffDef in ipairs(BUFF_GIVERS) do
         if not buffsEnabled() or not isRunning() then break end
@@ -593,14 +687,16 @@ local function runBuffCollection()
         end
 
         local success = walkToTarget(buffPart, BUFF_TOUCH_DIST, "Buff:" .. buffDef.name, BUFF_MAX_ATTEMPTS)
+
         if success then
             warn("[EggBot] Buff collected: " .. buffDef.name)
+            lastBuffTime = tick()   -- ✅ only reset timer on success
         else
-            warn("[EggBot] Buff skipped (all attempts failed): " .. buffDef.name)
+            warn("[EggBot] Buff failed — will retry in ~30s")
+            lastBuffTime = tick() - BUFF_INTERVAL + 30  -- retry in ~30s not full 2min
         end
     end
 
-    lastBuffTime       = tick()
     isCollectingPickup = false
     warn("[EggBot] Buff run done, resuming eggs")
     processQueue()
@@ -608,6 +704,7 @@ end
 
 -- ─────────────────────────────────────────────────────────────────────
 -- CLOVER COLLECTION  (every 4 min, 3 tries)
+-- FIX: same cooldown-on-success logic
 -- ─────────────────────────────────────────────────────────────────────
 
 local function runCloverCollection()
@@ -617,32 +714,34 @@ local function runCloverCollection()
     local clover = findClover()
     if not clover then
         warn("[EggBot] No clover found in workspace")
-        lastCloverTime = tick()
+        -- Retry in 30s instead of full 4min
+        lastCloverTime = tick() - CLOVER_INTERVAL + 30
         return
     end
 
     isCollectingPickup = true
-    warn("[EggBot] Starting clover collection run (pausing eggs)")
+    warn("[EggBot] Starting clover run (pausing eggs)")
 
     local success = walkToTarget(clover, CLOVER_TOUCH_DIST, "Clover", 3)
+
     if success then
         warn("[EggBot] Clover collected!")
+        lastCloverTime = tick()             -- ✅ only reset on success
     else
-        warn("[EggBot] Clover skipped (all attempts failed)")
+        warn("[EggBot] Clover failed — will retry in ~30s")
+        lastCloverTime = tick() - CLOVER_INTERVAL + 30
     end
 
-    lastCloverTime     = tick()
     isCollectingPickup = false
     warn("[EggBot] Clover run done, resuming eggs")
     processQueue()
 end
 
 -- ─────────────────────────────────────────────────────────────────────
--- PICKUP SCHEDULER  (runs independently, checks timers every second)
+-- PICKUP SCHEDULER
 -- ─────────────────────────────────────────────────────────────────────
 
 task.spawn(function()
-    -- Stagger the first collections slightly so they don't fire at once on load
     task.wait(5)
     if buffsEnabled()  then runBuffCollection()  end
     task.wait(2)
@@ -650,17 +749,14 @@ task.spawn(function()
 
     while true do
         task.wait(1)
-        if not isRunning() then continue end
-        if isCollectingPickup then continue end
+        if not isRunning() or isCollectingPickup then continue end
 
         local now = tick()
 
-        -- Clover takes priority (less frequent, so check first to avoid clashing)
         if cloverEnabled() and now - lastCloverTime >= CLOVER_INTERVAL then
-            -- Yield until eggs are not mid-walk, then go
             local waited = 0
             while isWalking and waited < 10 do task.wait(0.5) waited += 0.5 end
-            isWalking = false  -- force-release if stuck
+            isWalking = false
             runCloverCollection()
         elseif buffsEnabled() and now - lastBuffTime >= BUFF_INTERVAL then
             local waited = 0
@@ -670,6 +766,34 @@ task.spawn(function()
         end
     end
 end)
+
+-- ─────────────────────────────────────────────────────────────────────
+-- AUTO-SWITCH: interrupt for nearby priority eggs
+-- ─────────────────────────────────────────────────────────────────────
+
+-- Called whenever a new egg is queued. If it's priority AND close enough
+-- AND we're currently walking to a lower-priority egg, interrupt.
+local function checkShouldInterrupt(newEntry)
+    if not Features.autoSwitch then return end
+    if not isWalking then return end
+    if not PRIORITY_SET[newEntry.target.Name] then return end
+    if isCollectingPickup then return end
+
+    local root = getRoot(getChar())
+    if not root then return end
+
+    local newPos = resolvePos(newEntry.target)
+    if not newPos then return end
+
+    local distToNew = (root.Position - newPos).Magnitude
+    if distToNew > INTERRUPT_MAX_DIST then return end
+
+    -- Only interrupt if current target is NOT also priority
+    if currentTarget and PRIORITY_SET[currentTarget.target.Name] then return end
+
+    warn("[EggBot] 🔄 Priority egg detected nearby (" .. newEntry.target.Name .. ") — interrupting current path!")
+    interruptWalk = true
+end
 
 -- ─────────────────────────────────────────────────────────────────────
 -- EGG WALKING
@@ -688,8 +812,13 @@ local function walkToEgg(targetInstance, eggColor)
     local root = getRoot(char)
     if not hum or not root then return "fail" end
 
+    interruptWalk = false  -- clear any previous interrupt
+
     for attempt = 1, MAX_PATH_ATTEMPTS do
         if not farmEnabled() then return "stopped" end
+
+        -- Re-sort queue before each attempt so we have fresh info
+        maybeSortQueue()
 
         local targetPos = resolvePos(targetInstance)
         if not targetPos then return "done" end
@@ -716,14 +845,22 @@ local function walkToEgg(targetInstance, eggColor)
         local pathBroken = false
 
         for i, wp in ipairs(waypoints) do
-            -- Stop mid-path if a pickup run has been triggered
             if not farmEnabled() or not isAlive(targetInstance) then
                 pathBroken = true break
             end
+            if interruptWalk then
+                warn("[EggBot] Path interrupted for priority egg")
+                pathBroken = true break
+            end
+
             local prevPos = (i > 1) and waypoints[i-1].Position or root.Position
             if wp.Action == Enum.PathWaypointAction.Jump then doJump(hum) end
+
             local stepResult = stepToWaypoint(hum, root, wp, prevPos)
-            if stepResult == "stuck_reset" or stepResult == "gaptoowide"
+
+            if stepResult == "interrupted" then
+                pathBroken = true break
+            elseif stepResult == "stuck_reset" or stepResult == "gaptoowide"
                 or stepResult == "gapfail" or stepResult ~= "reached"
             then
                 pathBroken = true break
@@ -732,6 +869,7 @@ local function walkToEgg(targetInstance, eggColor)
 
         cleanup()
         if not farmEnabled() then return "stopped" end
+        if interruptWalk then interruptWalk = false return "interrupted" end
         if pathBroken then task.wait(0.1) continue end
 
         local collected = false
@@ -775,7 +913,10 @@ local function pruneQueue()
     eggQueue = alive
 end
 
-local function releaseWalking() isWalking = false end
+local function releaseWalking()
+    isWalking     = false
+    currentTarget = nil
+end
 
 function processQueue()
     if not farmEnabled() or isWalking or #eggQueue == 0 then return end
@@ -783,13 +924,26 @@ function processQueue()
     task.spawn(function()
         local hardTimer = task.delay(WALK_HARD_TIMEOUT, function() releaseWalking() end)
         pruneQueue()
+        smartSortQueue()  -- sort before popping
+
         local data = table.remove(eggQueue, 1)
         if data and queuedIds[data.id] then
             queuedIds[data.id] = nil
+            currentTarget = data
+
             if isAlive(data.target) and farmEnabled() then
                 respawnAndWait()
                 local result = walkToEgg(data.target, data.color)
-                if result == "fail" then
+
+                if result == "interrupted" then
+                    -- Re-queue the interrupted egg so it can be picked up again
+                    -- (it will be re-scored and re-sorted on next processQueue)
+                    if isAlive(data.target) then
+                        queuedIds[data.id] = true
+                        table.insert(eggQueue, { target=data.target, color=data.color, id=data.id })
+                        warn("[EggBot] Re-queued interrupted egg: " .. data.target.Name)
+                    end
+                elseif result == "fail" then
                     failCounts[data.id] = (failCounts[data.id] or 0) + 1
                     if failCounts[data.id] >= 3 then
                         warn("[EggBot] Auto-blacklisting " .. data.id)
@@ -798,6 +952,7 @@ function processQueue()
                 end
             end
         end
+
         task.cancel(hardTimer)
         releaseWalking()
         if farmEnabled() then task.wait(QUEUE_COOLDOWN) processQueue() end
@@ -830,8 +985,13 @@ function checkEgg(v)
         end
         if not hasPrompt then return end
 
+        local entry = { target=v, color=eggColor, id=uid }
         queuedIds[uid] = true
-        table.insert(eggQueue, isPriority and 1 or #eggQueue + 1, { target=v, color=eggColor, id=uid })
+        table.insert(eggQueue, entry)
+
+        -- Check if this should interrupt the current walk
+        checkShouldInterrupt(entry)
+
         if farmEnabled() then processQueue() end
     end)
 end
@@ -841,6 +1001,8 @@ player.CharacterAdded:Connect(function()
     stuckCheckCount    = 0
     isWalking          = false
     isCollectingPickup = false
+    interruptWalk      = false
+    currentTarget      = nil
     if isRunning() then processQueue() end
 end)
 
@@ -871,8 +1033,6 @@ ScreenGui.ResetOnSpawn   = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent         = playerGui
 
--- ── HUD button ───────────────────────────────────────────────────────
-
 local HUDButton = Instance.new("TextButton")
 HUDButton.Size             = UDim2.new(0, 90, 0, 28)
 HUDButton.Position         = UDim2.new(1, -100, 0, 10)
@@ -887,10 +1047,8 @@ HUDButton.ZIndex           = 10
 HUDButton.Parent           = ScreenGui
 Instance.new("UICorner", HUDButton).CornerRadius = UDim.new(0, 6)
 
--- ── Settings panel ────────────────────────────────────────────────────
-
 local Panel = Instance.new("Frame")
-Panel.Size             = UDim2.new(0, 240, 0, 340)
+Panel.Size             = UDim2.new(0, 240, 0, 360)
 Panel.Position         = UDim2.new(1, -250, 0, 44)
 Panel.BackgroundColor3 = Color3.fromRGB(14,14,14)
 Panel.BorderSizePixel  = 0
@@ -909,23 +1067,23 @@ TitleBar.BorderSizePixel  = 0
 TitleBar.TextColor3       = Color3.fromRGB(200,200,200)
 TitleBar.TextScaled       = true
 TitleBar.Font             = Enum.Font.SourceSansBold
-TitleBar.Text             = "EggBot  v3.1.0"
+TitleBar.Text             = "EggBot  v3.2.0"
 TitleBar.ZIndex           = 10
 TitleBar.Active           = true
 TitleBar.Parent           = Panel
 Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 8)
 
 local ScrollFrame = Instance.new("ScrollingFrame")
-ScrollFrame.Size                = UDim2.new(1, 0, 1, -32)
-ScrollFrame.Position            = UDim2.new(0, 0, 0, 32)
+ScrollFrame.Size                 = UDim2.new(1, 0, 1, -32)
+ScrollFrame.Position             = UDim2.new(0, 0, 0, 32)
 ScrollFrame.BackgroundTransparency = 1
-ScrollFrame.BorderSizePixel     = 0
-ScrollFrame.ScrollBarThickness  = 3
+ScrollFrame.BorderSizePixel      = 0
+ScrollFrame.ScrollBarThickness   = 3
 ScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(60,60,60)
-ScrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
-ScrollFrame.CanvasSize          = UDim2.new(0,0,0,0)
-ScrollFrame.ZIndex              = 10
-ScrollFrame.Parent              = Panel
+ScrollFrame.AutomaticCanvasSize  = Enum.AutomaticSize.Y
+ScrollFrame.CanvasSize           = UDim2.new(0,0,0,0)
+ScrollFrame.ZIndex               = 10
+ScrollFrame.Parent               = Panel
 
 local ListLayout = Instance.new("UIListLayout", ScrollFrame)
 ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
@@ -936,8 +1094,6 @@ ListPadding.PaddingLeft   = UDim.new(0, 12)
 ListPadding.PaddingRight  = UDim.new(0, 12)
 ListPadding.PaddingTop    = UDim.new(0, 8)
 ListPadding.PaddingBottom = UDim.new(0, 8)
-
--- ── UI helpers ────────────────────────────────────────────────────────
 
 local function makeSectionLabel(text, order)
     local lbl = Instance.new("TextLabel", ScrollFrame)
@@ -993,12 +1149,7 @@ local function makeToggleRow(labelText, initState, order, onToggle)
         btn.TextColor3       = Color3.fromRGB(220,220,220)
     end
     refresh(initState)
-
-    btn.MouseButton1Click:Connect(function()
-        local newState = onToggle()
-        refresh(newState)
-    end)
-
+    btn.MouseButton1Click:Connect(function() refresh(onToggle()) end)
     return row, refresh
 end
 
@@ -1032,10 +1183,8 @@ local function makeStatRow(labelText, order)
     return val
 end
 
--- ── Build panel ───────────────────────────────────────────────────────
-
+-- Build panel
 makeSectionLabel("Status", 1)
-
 makeToggleRow("Bot Running", isRunning(), 2, function()
     local new = not isRunning()
     setRunning(new)
@@ -1051,34 +1200,42 @@ makeToggleRow("Farm Eggs", Features.farmEggs, 5, function()
     if Features.farmEggs then processQueue() end
     return Features.farmEggs
 end)
-
 makeToggleRow("Collect Buffs (2m)", Features.collectBuffs, 6, function()
     Features.collectBuffs = not Features.collectBuffs
     return Features.collectBuffs
 end)
-
 makeToggleRow("Collect Clover (4m)", Features.collectClover, 7, function()
     Features.collectClover = not Features.collectClover
     return Features.collectClover
 end)
+makeToggleRow("Smart Sort", Features.smartSort, 8, function()
+    Features.smartSort = not Features.smartSort
+    if Features.smartSort then smartSortQueue() end
+    return Features.smartSort
+end)
+makeToggleRow("Auto-Switch Target", Features.autoSwitch, 9, function()
+    Features.autoSwitch = not Features.autoSwitch
+    return Features.autoSwitch
+end)
 
-makeDivider(8)
-makeSectionLabel("Stats", 9)
+makeDivider(10)
+makeSectionLabel("Stats", 11)
 
-local timeVal   = makeStatRow("Session Time", 10)
-local pointsVal = makeStatRow("Points",       11)
-local queueVal  = makeStatRow("Queue Size",   12)
-local pphVal    = makeStatRow("Pts / Hour",   13)
-local statusVal = makeStatRow("Status",       14)
-
-makeDivider(15)
-makeSectionLabel("Next Pickups", 16)
-
-local nextBuffVal   = makeStatRow("Buff in",   17)
-local nextCloverVal = makeStatRow("Clover in", 18)
+local timeVal    = makeStatRow("Session Time", 12)
+local pointsVal  = makeStatRow("Points",       13)
+local pphVal     = makeStatRow("Pts / Hour",   14)
+local queueVal   = makeStatRow("Queue Size",   15)
+local statusVal  = makeStatRow("Status",       16)
+local targetVal  = makeStatRow("Target",       17)
+local targetDist = makeStatRow("Target Dist",  18)
 
 makeDivider(19)
-makeSectionLabel("Queue", 20)
+makeSectionLabel("Next Pickups", 20)
+local nextBuffVal   = makeStatRow("Buff in",   21)
+local nextCloverVal = makeStatRow("Clover in", 22)
+
+makeDivider(23)
+makeSectionLabel("Queue", 24)
 
 local queueListLbl = Instance.new("TextLabel", ScrollFrame)
 queueListLbl.Size             = UDim2.new(1, 0, 0, 20)
@@ -1088,11 +1245,10 @@ queueListLbl.TextScaled       = true
 queueListLbl.Font             = Enum.Font.SourceSans
 queueListLbl.Text             = "No eggs queued"
 queueListLbl.TextXAlignment   = Enum.TextXAlignment.Left
-queueListLbl.LayoutOrder      = 21
+queueListLbl.LayoutOrder      = 25
 queueListLbl.ZIndex           = 11
 
--- ── Stats loop ────────────────────────────────────────────────────────
-
+-- Stats loop
 task.spawn(function()
     while true do
         task.wait(1)
@@ -1103,17 +1259,36 @@ task.spawn(function()
 
         timeVal.Text   = string.format("%dm %02ds", mins, secs)
         pointsVal.Text = tostring(totalPoints)
-        queueVal.Text  = tostring(#eggQueue)
         pphVal.Text    = tostring(pph)
-        statusVal.Text = isCollectingPickup and "🍀 Pickup run" or (isWalking and "🥚 Farming" or "Idle")
+        queueVal.Text  = tostring(#eggQueue)
 
-        -- Next pickup countdowns
+        -- Status
+        if isCollectingPickup then
+            statusVal.Text = "🍀 Pickup run"
+        elseif isWalking then
+            statusVal.Text = "🥚 Farming"
+        else
+            statusVal.Text = "Idle"
+        end
+
+        -- Current target info
+        local root = getRoot(getChar())
+        if currentTarget and isAlive(currentTarget.target) and root then
+            local tPos = resolvePos(currentTarget.target)
+            targetVal.Text  = currentTarget.target.Name
+            targetDist.Text = tPos and (math.floor((root.Position - tPos).Magnitude) .. " studs") or "?"
+        else
+            targetVal.Text  = "—"
+            targetDist.Text = "—"
+        end
+
+        -- Pickup countdowns
         local buffLeft   = math.max(0, math.ceil(BUFF_INTERVAL   - (tick() - lastBuffTime)))
         local cloverLeft = math.max(0, math.ceil(CLOVER_INTERVAL - (tick() - lastCloverTime)))
         nextBuffVal.Text   = string.format("%dm %02ds", math.floor(buffLeft/60),   buffLeft%60)
         nextCloverVal.Text = string.format("%dm %02ds", math.floor(cloverLeft/60), cloverLeft%60)
 
-        -- Queue names
+        -- Queue list
         if #eggQueue == 0 then
             queueListLbl.Text = "No eggs queued"
             queueListLbl.Size = UDim2.new(1, 0, 0, 20)
@@ -1129,16 +1304,13 @@ task.spawn(function()
     end
 end)
 
--- ── Panel toggle ──────────────────────────────────────────────────────
-
+-- Panel toggle
 HUDButton.MouseButton1Click:Connect(function()
     Panel.Visible = not Panel.Visible
 end)
 
--- ── Panel drag (title bar) ────────────────────────────────────────────
-
+-- Panel drag
 local panelDragging, panelDragStart, panelStartPos
-
 TitleBar.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
         panelDragging = true panelDragStart = input.Position panelStartPos = Panel.Position
@@ -1148,24 +1320,19 @@ TitleBar.InputEnded:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 then panelDragging = false end
 end)
 
--- ── HUD button drag ───────────────────────────────────────────────────
-
+-- HUD drag
 local hudDragging, hudDragStart, hudStartPos, didDrag
-
 HUDButton.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
         hudDragging = true didDrag = false hudDragStart = input.Position hudStartPos = HUDButton.Position
     end
 end)
 HUDButton.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        hudDragging = false
-    end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then hudDragging = false end
 end)
 
 UserInputService.InputChanged:Connect(function(input)
     if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-
     if panelDragging then
         local delta = input.Position - panelDragStart
         Panel.Position = UDim2.new(
@@ -1173,7 +1340,6 @@ UserInputService.InputChanged:Connect(function(input)
             panelStartPos.Y.Scale, panelStartPos.Y.Offset + delta.Y
         )
     end
-
     if hudDragging then
         local delta = input.Position - hudDragStart
         if delta.Magnitude > 4 then didDrag = true end
@@ -1195,4 +1361,4 @@ for _, v in ipairs(workspace:GetChildren()) do checkEgg(v) end
 workspace.ChildAdded:Connect(checkEgg)
 processQueue()
 
-print("[EggBot] Bot Loaded - v3.1.0")
+print("[EggBot] Bot Loaded - v3.2.0")

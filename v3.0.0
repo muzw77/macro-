@@ -1,5 +1,7 @@
 -- MADE BY Muzw :D
--- v3.2.0 - Smart AI: distance+rarity sorting, priority interrupt, buff cooldown fix
+-- v3.3.0 - Merged: Webhooks, Rare Egg Scanner, Chat Monitor, Excluded Zones,
+--          Clover Finder (Map-based), Auto-Use Items, Settings Panel, Config Persistence
+--          Removed: ObbyBlessing buff system
 
 -- ─────────────────────────────────────────────────────────────────────
 -- GAME ID LOCK
@@ -22,6 +24,8 @@ local Lighting         = game:GetService("Lighting")
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local HttpService      = game:GetService("HttpService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local GuiService       = game:GetService("GuiService")
 
 pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
 pcall(function() workspace.Terrain.Decoration = false end)
@@ -64,10 +68,71 @@ workspace.DescendantAdded:Connect(function(desc)
 end)
 
 -- ─────────────────────────────────────────────────────────────────────
--- STAT PERSISTENCE
+-- SERVICES / PLAYER
 -- ─────────────────────────────────────────────────────────────────────
 
-local STATS_FILE = "eggbot_stats.json"
+local Players            = game:GetService("Players")
+local PathfindingService = game:GetService("PathfindingService")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- ─────────────────────────────────────────────────────────────────────
+-- CONFIG PERSISTENCE
+-- ─────────────────────────────────────────────────────────────────────
+
+local CONFIG_FILE = "eggbot_config_v330.json"
+local STATS_FILE  = "eggbot_stats.json"
+
+local Config = {
+    -- Webhooks
+    WEBHOOK_ENABLED       = false,
+    WEBHOOK_URL           = "",   -- egg collected
+    WEBHOOK_WEATHER       = "",   -- weather/biome
+    WEBHOOK_RARE_EGGS     = "",   -- rare eggs
+    WEBHOOK_MERCHANTS     = "",   -- merchants
+    WEBHOOK_AURAS         = "",   -- aura rolls
+    WEBHOOK_PING_ID       = "",   -- discord user id for pings
+    VIP_SERVER_LINK       = "",
+    PING_MERCHANT_JESTER  = true,
+    PING_MERCHANT_RIN     = true,
+    PING_MERCHANT_MARI    = true,
+    -- Aura notifications
+    AURA_NOTIFY_ENABLED   = false,
+    AURA_MIN_SEND         = 3,    -- 10^3 = 1,000
+    AURA_MIN_PING         = 6,    -- 10^6 = 1,000,000
+    -- Auto items
+    AUTO_USE_STRANGE_CONTROLLER = false,
+    AUTO_USE_BIOME_RANDOMIZER   = false,
+    ITEM_USE_INTERVAL     = 20,   -- minutes
+    -- Clover
+    COLLECT_CLOVERS       = false,
+    -- Misc
+    PROMPT_DISTANCE       = 5,
+}
+
+local function saveConfig()
+    pcall(writefile, CONFIG_FILE, HttpService:JSONEncode(Config))
+end
+
+local function loadConfig()
+    if readfile and isfile and isfile(CONFIG_FILE) then
+        pcall(function()
+            local decoded = HttpService:JSONDecode(readfile(CONFIG_FILE))
+            if decoded then
+                for k, v in pairs(decoded) do
+                    if Config[k] ~= nil then Config[k] = v end
+                end
+            end
+        end)
+    end
+end
+
+loadConfig()
+
+-- ─────────────────────────────────────────────────────────────────────
+-- STAT PERSISTENCE
+-- ─────────────────────────────────────────────────────────────────────
 
 local function loadStats()
     local ok, data = pcall(readfile, STATS_FILE)
@@ -113,11 +178,48 @@ setRunning(true)
 
 local Features = {
     farmEggs      = true,
-    collectBuffs  = true,
-    collectClover = true,
-    smartSort     = true,   -- distance+rarity combined sorting
-    autoSwitch    = true,   -- interrupt path for priority eggs
+    collectClover = false,
+    smartSort     = true,
+    autoSwitch    = true,
 }
+
+-- ─────────────────────────────────────────────────────────────────────
+-- EXCLUDED ZONES
+-- ─────────────────────────────────────────────────────────────────────
+
+local EXCLUDED_ZONES = {
+    { center = Vector3.new(55.676, 102.85, -594.476), radius = 100 },
+    { center = Vector3.new(-50.29, 95.5, -102.54),    radius = 80  },
+    { center = Vector3.new(16.326, 93.75, -438.988),  radius = 20  },
+    { center = Vector3.new(235.3, 95.8, -622.64),     radius = 40  },
+    { cframe = CFrame.new(120.687668, 108.350014, -395.919312, 1,-0,0,0,1,-0,0,0,1), size = Vector3.new(25,15,25) },
+    { cframe = CFrame.new(365, 95, -71, 0,0,1,0,1,0,-1,0,0),  size = Vector3.new(20,20,20) },
+    { cframe = CFrame.new(-64, 96, -151, 0,0,1,0,1,0,-1,0,0), size = Vector3.new(20,20,20) },
+    { cframe = CFrame.new(-10, 95, -138, 0,0,1,0,1,0,-1,0,0), size = Vector3.new(20,20,20) },
+    { cframe = CFrame.new(123, 102, -387, 0,0,1,0,1,0,-1,0,0),size = Vector3.new(10,10,10) },
+    { cframe = CFrame.new(-48.87, 95.6, -110.41, 1,0,0,0,1,0,0,0,1), size = Vector3.new(10,10,10) },
+    { cframe = CFrame.new(-39.512001, 102.799988, -79.0240021, 1,0,0,0,1,0,0,0,1), size = Vector3.new(10,10,10) },
+    { cframe = CFrame.new(202.722015, 103.999969, -660.192017, 1,0,0,0,1,0,0,0,1), size = Vector3.new(10,10,10) },
+    { cframe = CFrame.new(221.343155, 96.5700226, -609.875244, 0,0,1,0,1,-0,-1,0,0), size = Vector3.new(20,20,20) },
+    { cframe = CFrame.new(155.315994, 97.8000336, -689.891968, 1,0,0,0,1,0,0,0,1), size = Vector3.new(20,20,20) },
+    { cframe = CFrame.new(630.699951, 99.7500458, -102.714005, 1,0,0,0,1,0,0,0,1), size = Vector3.new(10,10,10) },
+    { cframe = CFrame.new(116.350006, 105.799973, -681.98999, 1,0,0,0,1,0,0,0,1), size = Vector3.new(10,10,10) },
+}
+
+local function isPositionExcluded(pos)
+    for _, zone in ipairs(EXCLUDED_ZONES) do
+        if zone.radius and zone.center then
+            if (pos - zone.center).Magnitude <= zone.radius then return true end
+        elseif zone.cframe and zone.size then
+            local localPos = zone.cframe:PointToObjectSpace(pos)
+            local half = zone.size / 2
+            if math.abs(localPos.X) <= half.X and math.abs(localPos.Y) <= half.Y and math.abs(localPos.Z) <= half.Z then
+                return true
+            end
+        end
+    end
+    return false
+end
 
 -- ─────────────────────────────────────────────────────────────────────
 -- ANTI-STUCK GEOMETRY
@@ -150,16 +252,6 @@ makePart({ Name="Anti-Stuck4", Anchored=true, Size=Vector3.new(40,50,8),   Posit
 makePart({ Name="Anti-Stuck5", Anchored=true, Size=Vector3.new(80,2,8),    Position=Vector3.new(400,91,-316.5),        Rotation=Vector3.new(0,0,0),     Transparency=0.5 })
 
 -- ─────────────────────────────────────────────────────────────────────
--- SERVICES / PLAYER
--- ─────────────────────────────────────────────────────────────────────
-
-local Players            = game:GetService("Players")
-local PathfindingService = game:GetService("PathfindingService")
-
-local player    = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
-
--- ─────────────────────────────────────────────────────────────────────
 -- CONSTANTS
 -- ─────────────────────────────────────────────────────────────────────
 
@@ -182,59 +274,35 @@ local PARKOUR_JUMP_BOOST    = true
 local STUCK_RESET_THRESHOLD = 4
 local stuckCheckCount       = 0
 
--- Smart sort re-sort interval (seconds)
 local SORT_INTERVAL         = 4
-
--- Priority interrupt: only interrupt current walk if a priority egg
--- spawns closer than this distance to the player
 local INTERRUPT_MAX_DIST    = 80
 
--- ── Buff / Clover timing ──────────────────────────────────────────────
-local BUFF_INTERVAL         = 120   -- 2 minutes
-local BUFF_MAX_ATTEMPTS     = 3
-local CLOVER_INTERVAL       = 240   -- 4 minutes
-local BUFF_TOUCH_DIST       = 3
 local CLOVER_TOUCH_DIST     = 3
 
-local lastBuffTime          = 0
-local lastCloverTime        = 0
-local isCollectingPickup    = false
+-- ─────────────────────────────────────────────────────────────────────
+-- EGG RARITY / COLORS / POINTS
+-- ─────────────────────────────────────────────────────────────────────
 
-local BUFF_GIVERS = {
-    { path = {"Map","BuffGivers","ObbyBlessing"}, name = "ObbyBlessing" },
-}
-
-local CLOVER_NAME = "clover"
-
--- ── Egg rarity scores (higher = rarer/more valuable) ─────────────────
--- Used in combined distance+rarity sorting.
--- Priority eggs get the highest score so they always bubble near the top.
--- Point eggs are scored by their point value.
--- Normal numbered eggs are scored by tier.
 local RARITY_SCORE = {
-    -- Priority / special eggs  (score 1000+)
-    andromeda_egg       = 1500,
+    andromeda_egg       = 1110,
     the_egg_of_the_sky  = 1400,
-    royal_egg           = 1300,
+    royal_egg           = 1090,
     angelic_egg         = 1200,
-    blooming_egg        = 1100,
-    dreamer_egg         = 1050,
-    forest_egg          = 1000,
+    blooming_egg        = 1300,
+    dreamer_egg         = 1500,
+    forest_egg          = 1370,
     hatch_egg           = 1000,
-    egg_v2              = 1000,
-    -- Point eggs scored by value
+    egg_v2              = 1450,
     point_egg_6         = 900,
     point_egg_5         = 700,
     point_egg_4         = 500,
     point_egg_3         = 350,
     point_egg_2         = 200,
     point_egg_1         = 100,
-    -- Potions
     random_potion_egg_1 = 800,
     random_potion_egg_2 = 800,
 }
 
--- Numbered eggs (egg_1 … egg_6) get score = tier * 60
 local function rarityScoreForName(name)
     if RARITY_SCORE[name] then return RARITY_SCORE[name] end
     local tier = tonumber(string.match(name, "egg_(%d+)$"))
@@ -278,6 +346,715 @@ local BLACKLIST  = {}
 local failCounts = {}
 
 -- ─────────────────────────────────────────────────────────────────────
+-- RARE EGG DATA
+-- ─────────────────────────────────────────────────────────────────────
+
+local RARE_EGG_INFO = {
+    ["Hatch Egg"]          = { aura="Hatchwarden",     spawnChance="0.1% (1 in 1,000)",         despawnTime="30 Minutes", emoji="🐣", color=5763719   },
+    ["Royal Egg"]          = { aura="Emperor",         spawnChance="0.05% (1 in 2,000)",        despawnTime="30 Minutes", emoji="👑", color=16766720  },
+    ["Hatch / Royal Egg"]  = { aura="Hatchwarden / Emperor", spawnChance="0.1% / 0.05%",        despawnTime="30 Minutes", emoji="👑", color=16766720  },
+    ["Andromeda Egg"]      = { aura="Eggsistence",     spawnChance="0.013% (1 in 7,692)",       despawnTime="1 Hour",     emoji="🌌", color=7419530   },
+    ["Angelic Egg"]        = { aura="Revive",          spawnChance="0.0062% (1 in 16,129)",     despawnTime="1 Hour",     emoji="👼", color=16777200  },
+    ["Blooming Egg"]       = { aura="EGGORE",          spawnChance="0.0057% (1 in 17,543)",     despawnTime="1 Hour",     emoji="🌺", color=16744448  },
+    ["Forest Egg"]         = { aura="Eostre",          spawnChance="0.004% (1 in 25,000)",      despawnTime="2 Hours",    emoji="🌲", color=3066993   },
+    ["The Egg of the Sky"] = { aura="EGGIS",           spawnChance="0.0035% (1 in 28,571)",     despawnTime="2 Hours",    emoji="☁",  color=3447003   },
+    ["Egg V2.0"]           = { aura="Y.O.L.K.E.G.G.", spawnChance="0.0023% (1 in 43,478)",     despawnTime="2 Hours",    emoji="🤖", color=3800852   },
+    ["Dreamer Egg"]        = { aura="Sky Festival",    spawnChance="0.002% (1 in 50,000)",      despawnTime="2 Hours",    emoji="💫", color=16761035  },
+}
+
+local RARE_EGG_IDENTIFIERS = {
+    { namePattern="royal.?egg",    displayName="Royal Egg"          },
+    { namePattern="hatch.?egg",    displayName="Hatch Egg"          },
+    { namePattern="andromeda.?egg",displayName="Andromeda Egg"      },
+    { namePattern="angelic.?egg",  displayName="Angelic Egg"        },
+    { namePattern="blooming.?egg", displayName="Blooming Egg"       },
+    { namePattern="forest.?egg",   displayName="Forest Egg"         },
+    { namePattern="sky.?egg",      displayName="The Egg of the Sky" },
+    { namePattern="egg.?v2",       displayName="Egg V2.0"           },
+    { namePattern="dreamer.?egg",  displayName="Dreamer Egg"        },
+}
+
+local RARE_PROMPT_PATTERNS = {
+    {"special egg",    "Hatch / Royal Egg"},
+    {"royal",          "Royal Egg"},
+    {"hatch",          "Hatch Egg"},
+    {"andromeda",      "Andromeda Egg"},
+    {"angelic",        "Angelic Egg"},
+    {"blooming",       "Blooming Egg"},
+    {"forest egg",     "Forest Egg"},
+    {"egg of the sky", "The Egg of the Sky"},
+    {"egg cannon",     "The Egg of the Sky"},
+    {"egg v2",         "Egg V2.0"},
+    {"y.o.l.k",        "Egg V2.0"},
+    {"dreamer",        "Dreamer Egg"},
+    {"sky festival",   "Dreamer Egg"},
+}
+
+local function getRareEggInfo(name)   return RARE_EGG_INFO[name] end
+local function getRareEggColor(name)  local i = getRareEggInfo(name) return i and i.color or 16753920 end
+local function buildRarityFields(name)
+    local i = getRareEggInfo(name)
+    if not i then return nil end
+    return {
+        {["name"]="🎭 Aura",         ["value"]="**"..i.aura.."**",      ["inline"]=true},
+        {["name"]="🎲 Spawn Chance", ["value"]=i.spawnChance,            ["inline"]=true},
+        {["name"]="⏱ Despawn Time", ["value"]=i.despawnTime,            ["inline"]=true},
+    }
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- WEBHOOK SYSTEM
+-- ─────────────────────────────────────────────────────────────────────
+
+local function sendGenericWebhook(webhookUrl, title, description, color, ping, fields)
+    if not Config.WEBHOOK_ENABLED then return end
+    if not webhookUrl or webhookUrl == "" then return end
+
+    local finalPing = ping or ""
+    if finalPing ~= "" and Config.VIP_SERVER_LINK ~= "" then
+        finalPing = finalPing .. "\n\n🔗 **Join server:** " .. Config.VIP_SERVER_LINK
+    end
+
+    local data = {
+        ["content"] = finalPing,
+        ["allowed_mentions"] = { ["parse"] = {"users","roles"} },
+        ["embeds"] = {{
+            ["title"]       = title,
+            ["description"] = description,
+            ["color"]       = color,
+            ["fields"]      = fields,
+            ["footer"]      = { ["text"] = "EggBot v3.3.0" }
+        }}
+    }
+
+    local req = nil
+    if typeof(request)       == "function" then req = request
+    elseif typeof(http_request) == "function" then req = http_request
+    elseif syn and typeof(syn.request) == "function" then req = syn.request
+    elseif http and typeof(http.request) == "function" then req = http.request
+    end
+
+    if not req then warn("[Webhook] No HTTP request function found!") return end
+
+    pcall(function()
+        req({
+            Url     = webhookUrl,
+            Method  = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body    = HttpService:JSONEncode(data)
+        })
+    end)
+end
+
+local function getPingText()
+    if Config.WEBHOOK_PING_ID and Config.WEBHOOK_PING_ID ~= "" then
+        local id = string.gsub(Config.WEBHOOK_PING_ID, "[^%d]", "")
+        if id ~= "" then return "<@" .. id .. ">" end
+    end
+    return ""
+end
+
+-- Send webhook when an egg is collected
+local function sendEggWebhook(eggName)
+    local num = tonumber(string.match(eggName, "%d+") or 0)
+    local isPotion = string.match(eggName, "potion")
+    local pts = EGG_POINTS[eggName]
+
+    task.wait(1.5)
+
+    local curPoints = tostring(totalPoints)
+    local titleText  = isPotion and "🧪 Potion Egg Collected!" or "🥚 Egg Collected!"
+    local embedColor = isPotion and 10181046 or 14925732
+    local fields = {}
+    if pts then
+        table.insert(fields, {["name"]="💎 Points Gained", ["value"]=tostring(pts), ["inline"]=true})
+    end
+    table.insert(fields, {["name"]="💰 Total Points", ["value"]=curPoints, ["inline"]=true})
+
+    sendGenericWebhook(Config.WEBHOOK_URL, titleText, "Collected **"..eggName.."**", embedColor, "", fields)
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- WEATHER / BIOME WEBHOOK
+-- ─────────────────────────────────────────────────────────────────────
+
+local WEATHER_COLORS = {
+    normal=16777215, windy=11393254, snowy=11393254, rainy=3447003,
+    sandstorm=15787660, hell=16753920, starfall=3447003, heaven=16777184,
+    corruption=8388736, null=8421504, dreamspace=16761035, glitched=3800852,
+    cyberspace=11393254, eggland=9502544
+}
+
+local lastWeather = ""
+
+local function normalizeBiomeName(text)
+    return string.gsub(string.lower(text), "%s+", "")
+end
+
+local function isValidBiome(name)
+    local lower = string.lower(name)
+    if lower == "none" or lower == "tip" or lower == "system" then return false end
+    if string.find(lower, "%segg") or lower == "egg" then return false end
+    if lower == "normal" then return true end
+    local normalized = normalizeBiomeName(name)
+    for k in pairs(WEATHER_COLORS) do
+        if string.find(normalized, k) then return true end
+    end
+    return false
+end
+
+local function stripRichText(text)
+    if not text or typeof(text) ~= "string" then return "" end
+    local s = string.gsub(text, "<[^>]+>", "")
+    s = string.gsub(s, "^%s+", "") s = string.gsub(s, "%s+$", "")
+    return s
+end
+
+local function updateWeatherStatus(rawText)
+    local text = string.lower(rawText)
+    if text == lastWeather or rawText == "" then return end
+    lastWeather = text
+
+    local biomeName = text
+    local color = WEATHER_COLORS.normal
+    local ping  = ""
+    local normalized = normalizeBiomeName(rawText)
+
+    if string.find(text, "glitch") then biomeName = "glitched"
+    else
+        for k, v in pairs(WEATHER_COLORS) do
+            if string.find(normalized, k) then biomeName = k color = v break end
+        end
+    end
+    if biomeName == "glitched" then color = WEATHER_COLORS.glitched end
+    if biomeName == "dreamspace" or biomeName == "glitched" or biomeName == "cyberspace" then
+        ping = getPingText()
+    end
+    if string.find(biomeName, "none") then return end
+
+    sendGenericWebhook(Config.WEBHOOK_WEATHER, "🌦 Weather Changed!", "Biome: **"..rawText.."**", color, ping)
+end
+
+local function checkWeather()
+    pcall(function()
+        local mi = player.PlayerGui.MainInterface
+        for _, obj in ipairs(mi:GetDescendants()) do
+            if obj:IsA("TextLabel") then
+                local txt = obj.Text
+                if not txt or txt == "" or txt == "Label" then continue end
+                local lower = string.lower(txt)
+                if string.find(lower, "%segg") or lower == "egg" then continue end
+                local inner = string.match(txt, "^%[%s*(.-)%s*%]$")
+                if inner and isValidBiome(inner) then
+                    updateWeatherStatus(txt) break
+                elseif (obj.ZIndex == 2 or obj.ZIndex == 3) and isValidBiome(txt) then
+                    updateWeatherStatus("[ " .. string.upper(txt) .. " ]") break
+                end
+            end
+        end
+    end)
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- MERCHANT DETECTION
+-- ─────────────────────────────────────────────────────────────────────
+
+local recentlyNotifiedMerchants = {}
+
+local function checkMerchantMessage(text)
+    if not text or typeof(text) ~= "string" then return end
+    local cleanText = stripRichText(text)
+    if not string.find(cleanText, "[Merchant]", 1, true) then return end
+    local lowerText = string.lower(cleanText)
+    local merchantName, ping, color = nil, "", 8421504
+
+    if     string.find(lowerText, "jester") then merchantName="Jester" ping=Config.PING_MERCHANT_JESTER and getPingText() or "" color=16711680
+    elseif string.find(lowerText, "rin")    then merchantName="Rin"    ping=Config.PING_MERCHANT_RIN    and getPingText() or "" color=3447003
+    elseif string.find(lowerText, "mari")   then merchantName="Mari"   ping=Config.PING_MERCHANT_MARI   and getPingText() or "" color=16761035
+    end
+
+    local dupeKey = merchantName or cleanText
+    local now = tick()
+    if recentlyNotifiedMerchants[dupeKey] and (now - recentlyNotifiedMerchants[dupeKey]) < 30 then return end
+    recentlyNotifiedMerchants[dupeKey] = now
+
+    if merchantName then
+        sendGenericWebhook(Config.WEBHOOK_MERCHANTS,
+            "🎪 " .. merchantName .. " has arrived!",
+            "**" .. merchantName .. "** appeared!\nMessage: `" .. cleanText .. "`",
+            color, ping)
+    else
+        sendGenericWebhook(Config.WEBHOOK_MERCHANTS, "🎪 Merchant Appeared!",
+            "Unknown merchant: `" .. cleanText .. "`", color)
+    end
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- AURA ROLL DETECTION
+-- ─────────────────────────────────────────────────────────────────────
+
+local recentlyNotifiedAuras = {}
+
+local function checkAuraRollMessage(text)
+    if not text or typeof(text) ~= "string" then return end
+    if not Config.AURA_NOTIFY_ENABLED then return end
+    local cleanText = stripRichText(text)
+    if not string.find(cleanText, "HAS FOUND", 1, true) then return end
+    if not string.find(cleanText, "CHANCE OF", 1, true) then return end
+
+    local playerInfo, auraName, chanceStr =
+        string.match(cleanText, "(.+) HAS FOUND (.+), CHANCE OF 1 IN ([%d,%.]+)")
+    if not auraName then
+        playerInfo, auraName, chanceStr =
+            string.match(cleanText, "(.+) HAS FOUND (.+), CHANCE OF ([%d,%.]+)")
+    end
+    if not auraName or not chanceStr then return end
+    if not string.find(playerInfo, "(@" .. player.Name .. ")", 1, true) then return end
+
+    auraName  = string.gsub(auraName,  "%s*%[.-%]%s*$", "")
+    auraName  = string.gsub(auraName,  "%s+$", "")
+    local chanceClean = string.gsub(string.gsub(chanceStr, ",", ""), "%.$", "")
+    local chanceNumber = tonumber(chanceClean)
+    if not chanceNumber or chanceNumber < 1 then return end
+    if chanceNumber < math.pow(10, Config.AURA_MIN_SEND) then return end
+
+    local dupeKey = playerInfo .. "_" .. auraName .. "_" .. tostring(chanceNumber)
+    if recentlyNotifiedAuras[dupeKey] then return end
+    recentlyNotifiedAuras[dupeKey] = true
+    task.delay(30, function() recentlyNotifiedAuras[dupeKey] = nil end)
+
+    local function fmt(n)
+        if n >= 1e9 then return string.format("%.2fB", n/1e9)
+        elseif n >= 1e6 then return string.format("%.2fM", n/1e6)
+        elseif n >= 1e3 then return string.format("%.1fK", n/1e3)
+        else return tostring(math.floor(n)) end
+    end
+
+    local color = 8421504
+    if     chanceNumber >= 1e9 then color = 16711680
+    elseif chanceNumber >= 1e8 then color = 16753920
+    elseif chanceNumber >= 1e7 then color = 16766720
+    elseif chanceNumber >= 1e6 then color = 7419530
+    elseif chanceNumber >= 1e5 then color = 3447003
+    elseif chanceNumber >= 1e4 then color = 3066993
+    end
+
+    local ping = chanceNumber >= math.pow(10, Config.AURA_MIN_PING) and getPingText() or ""
+    local fields = {
+        {["name"]="Aura",   ["value"]="**"..auraName.."**",                  ["inline"]=true},
+        {["name"]="Rarity", ["value"]="1 in "..fmt(chanceNumber),            ["inline"]=true},
+    }
+    sendGenericWebhook(Config.WEBHOOK_AURAS,
+        "HAS FOUND " .. auraName .. "!",
+        "**" .. playerInfo .. "** obtained **" .. auraName .. "**\nChance: **1 in " .. fmt(chanceNumber) .. "**",
+        color, ping, fields)
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- CHAT MONITOR
+-- ─────────────────────────────────────────────────────────────────────
+
+local function checkWeatherMessage(text)
+    if not text or typeof(text) ~= "string" then return end
+    local cleanText = stripRichText(text)
+    local biomeMatch = string.match(cleanText, "^%[([%a%s]+)%]%:")
+    if biomeMatch then
+        biomeMatch = string.gsub(biomeMatch, "%s+$", "")
+        if isValidBiome(biomeMatch) then
+            updateWeatherStatus("[ " .. string.upper(biomeMatch) .. " ]")
+        end
+    end
+end
+
+local function initChatMonitor()
+    pcall(function()
+        local TCS = game:GetService("TextChatService")
+        if TCS.ChatVersion == Enum.ChatVersion.TextChatService then
+            TCS.MessageReceived:Connect(function(msg)
+                checkMerchantMessage(msg.Text)
+                checkAuraRollMessage(msg.Text)
+                checkWeatherMessage(msg.Text)
+            end)
+        end
+    end)
+    pcall(function()
+        local ev = game:GetService("ReplicatedStorage"):FindFirstChild("DefaultChatSystemChatEvents")
+        if ev then
+            local onMsg = ev:FindFirstChild("OnNewMessage")
+            if onMsg then
+                onMsg.OnClientEvent:Connect(function(data)
+                    if type(data) == "table" and data.Message then
+                        checkMerchantMessage(data.Message)
+                        checkAuraRollMessage(data.Message)
+                        checkWeatherMessage(data.Message)
+                    end
+                end)
+            end
+        end
+    end)
+    playerGui.DescendantAdded:Connect(function(obj)
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+            task.delay(0.2, function()
+                pcall(function()
+                    checkMerchantMessage(obj.Text)
+                    checkAuraRollMessage(obj.Text)
+                    checkWeatherMessage(obj.Text)
+                end)
+            end)
+        end
+    end)
+end
+
+task.spawn(initChatMonitor)
+
+-- ─────────────────────────────────────────────────────────────────────
+-- RARE EGG SCANNER
+-- ─────────────────────────────────────────────────────────────────────
+
+local detectedRareEggs  = setmetatable({}, {__mode="k"})
+local rareEggQueue      = {}
+local recentlyNotifiedEggs = {}
+
+local function identifyRareEgg(obj)
+    local name = string.lower(obj.Name)
+    for _, id in ipairs(RARE_EGG_IDENTIFIERS) do
+        if string.find(name, id.namePattern) then return id.displayName end
+    end
+    local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt")
+    if not prompt and obj:IsA("Model") then
+        for _, child in ipairs(obj:GetChildren()) do
+            prompt = child:FindFirstChildWhichIsA("ProximityPrompt")
+            if prompt then break end
+        end
+    end
+    if prompt then
+        local a = string.lower(prompt.ActionText or "")
+        local o = string.lower(prompt.ObjectText  or "")
+        for _, pp in ipairs(RARE_PROMPT_PATTERNS) do
+            if string.find(a, pp[1]) or string.find(o, pp[1]) then return pp[2] end
+        end
+    end
+    return nil
+end
+
+local function buildRareEggEntry(obj, displayName)
+    local part = obj:IsA("BasePart") and obj
+        or (obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)))
+    if not part then return nil end
+    return {
+        target   = obj,
+        part     = part,
+        position = part.Position,
+        color    = PRIORITY_COLOR,
+        id       = displayName .. tostring(obj),
+        isRare   = true,
+        rareName = displayName,
+    }
+end
+
+local function onRareEggDetected(obj, spawned)
+    if detectedRareEggs[obj] then return end
+    if not (obj:IsA("Model") or obj:IsA("BasePart")) then return end
+    local rareName = identifyRareEgg(obj)
+    if not rareName then return end
+    detectedRareEggs[obj] = true
+
+    local notifKey = "explorer_" .. rareName
+    if not recentlyNotifiedEggs[notifKey] then
+        recentlyNotifiedEggs[notifKey] = true
+        local info  = getRareEggInfo(rareName)
+        local emoji = info and info.emoji or "✨"
+        sendGenericWebhook(
+            Config.WEBHOOK_RARE_EGGS,
+            emoji .. (spawned and " RARE EGG JUST SPAWNED!" or " RARE EGG FOUND IN MAP!"),
+            "Rare egg detected: **" .. rareName .. "**\nNavigating to collect it!",
+            getRareEggColor(rareName),
+            getPingText(),
+            buildRarityFields(rareName)
+        )
+        task.delay(120, function() recentlyNotifiedEggs[notifKey] = nil end)
+    end
+
+    local entry = buildRareEggEntry(obj, rareName)
+    if entry then
+        if spawned then
+            table.insert(rareEggQueue, 1, entry)
+        else
+            table.insert(rareEggQueue, entry)
+        end
+    end
+end
+
+local function scanForRareEggs()
+    for _, obj in ipairs(workspace:GetChildren()) do
+        onRareEggDetected(obj, false)
+    end
+end
+
+workspace.ChildAdded:Connect(function(obj)
+    task.delay(0.5, function()
+        if obj and obj.Parent then onRareEggDetected(obj, true) end
+    end)
+end)
+
+-- ─────────────────────────────────────────────────────────────────────
+-- CLOVER FINDER (Map-based model scanning)
+-- ─────────────────────────────────────────────────────────────────────
+
+local function findClovers()
+    local clovers = {}
+    local mapFolder = workspace:FindFirstChild("Map")
+    if not mapFolder then return clovers end
+    for _, model in ipairs(mapFolder:GetChildren()) do
+        if not model:IsA("Model") then continue end
+        local effectFolder = model:FindFirstChild("effect")
+        if not effectFolder then continue end
+        if not effectFolder:FindFirstChild("luckyeffect") then continue end
+        local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+        if not part then continue end
+        if part.Position.Y > 130 then continue end
+        if isPositionExcluded(part.Position) then continue end
+        local prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true)
+        table.insert(clovers, {
+            target   = model,
+            part     = part,
+            position = part.Position,
+            color    = Color3.fromRGB(0, 220, 80),
+            id       = "clover_" .. tostring(model),
+            isClover = true,
+        })
+    end
+    table.sort(clovers, function(a, b)
+        local root = getRoot(getChar())
+        if not root then return false end
+        return (root.Position - a.position).Magnitude < (root.Position - b.position).Magnitude
+    end)
+    return clovers
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- PROXIMITY PROMPT DISABLER
+-- ─────────────────────────────────────────────────────────────────────
+
+local function toggleNPCPrompts(state)
+    local routes = {
+        {"Map","QuestBoard","Proximity","ProximityPrompt"},
+        {"Map","17597ef9-f805-4ff9-9cd4-86652e056ef9","Torso","ProximityPrompt"},
+        {"Map","UGCShop","Title","Attachment","ProximityPrompt"},
+        {"Boss Portal","Portal","Attachment","ProximityPrompt"},
+        {"Map","Miscs","FishShop","NPC","ProximityPrompt"},
+        {"Map","Miscs","Rig","HumanoidRootPart","ProximityPrompt"},
+        {"Map","Miscs","HoodedFigure","ProximityPrompt"},
+        {"Map","SHOP","Jake","ProximityPrompt"},
+    }
+    for _, route in ipairs(routes) do
+        local cur = workspace
+        for _, name in ipairs(route) do
+            if cur then cur = cur:FindFirstChild(name) end
+        end
+        if cur and cur:IsA("ProximityPrompt") then cur.Enabled = state end
+    end
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- AUTO-USE ITEMS (Strange Controller / Biome Randomizer)
+-- ─────────────────────────────────────────────────────────────────────
+
+local lastStrangeControllerUse = 0
+local lastBiomeRandomizerUse   = 0
+
+local function smartClickBtn(button)
+    if not button then return false end
+    pcall(function()
+        local pos   = button.AbsolutePosition
+        local size  = button.AbsoluteSize
+        local inset = GuiService:GetGuiInset()
+        local cx = pos.X + size.X / 2
+        local cy = pos.Y + size.Y / 2 + inset.Y
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true,  game, 1)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+    end)
+    return true
+end
+
+local function isGameInventoryVisible()
+    local mi = playerGui:FindFirstChild("MainInterface")
+    if not mi then return false end
+    local inv = mi:FindFirstChild("Inventory")
+    return inv and inv.Visible and inv.AbsolutePosition.X > -500
+end
+
+local function toggleGameInventory()
+    local mi = playerGui:FindFirstChild("MainInterface")
+    if not mi then return false end
+    local sb = mi:FindFirstChild("SideButtons")
+    if not sb then return false end
+    local btns = {}
+    for _, child in ipairs(sb:GetChildren()) do
+        if child:IsA("TextButton") or child:IsA("ImageButton") then
+            table.insert(btns, child)
+        end
+    end
+    table.sort(btns, function(a,b) return a.AbsolutePosition.Y < b.AbsolutePosition.Y end)
+    if btns[1] then smartClickBtn(btns[1]) task.wait(0.3) return true end
+    return false
+end
+
+local function closeGameInventory()
+    local mi = playerGui:FindFirstChild("MainInterface")
+    if not mi then return end
+    for _, desc in ipairs(mi:GetDescendants()) do
+        if desc:IsA("ImageLabel") and
+           (desc.Image == "http://www.roblox.com/asset/?id=6031094678" or
+            desc.Image == "rbxassetid://6031094678") then
+            local btn = desc.Parent
+            if btn and (btn:IsA("ImageButton") or btn:IsA("TextButton")) then
+                smartClickBtn(btn) task.wait(0.3) return
+            end
+        end
+    end
+    toggleGameInventory()
+end
+
+local function useGameItem(itemName)
+    local mi = playerGui:FindFirstChild("MainInterface")
+    if not mi then return false, "No MainInterface" end
+    local inv = mi:FindFirstChild("Inventory")
+    if not inv then return false, "No Inventory" end
+
+    local wasOpen = isGameInventoryVisible()
+    if not wasOpen then
+        toggleGameInventory() task.wait(0.5)
+        if not isGameInventoryVisible() then return false, "Couldn't open inventory" end
+    end
+
+    -- Switch to Items tab
+    pcall(function()
+        local itemsFrame = inv:FindFirstChild("Items")
+        if itemsFrame then
+            local tab = itemsFrame:FindFirstChild("ItemsTab")
+            if tab then smartClickBtn(tab) task.wait(0.3) end
+        end
+    end)
+
+    -- Click quick-category tool filter
+    pcall(function()
+        local qc = inv:FindFirstChild("QuickCategory")
+        if qc then
+            for _, child in ipairs(qc:GetChildren()) do
+                if child:IsA("ImageButton") then
+                    for _, desc in ipairs(child:GetDescendants()) do
+                        if desc:IsA("ImageLabel") and desc.Image == "rbxassetid://100436585165147" then
+                            smartClickBtn(child) task.wait(0.4) break
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    local gridFrame = nil
+    pcall(function() gridFrame = inv.Items.ItemGrid.ItemGridScrollingFrame end)
+    if not gridFrame then
+        for _, desc in ipairs(inv:GetDescendants()) do
+            if desc:IsA("ScrollingFrame") and desc.Name:find("Grid") then
+                gridFrame = desc break
+            end
+        end
+    end
+    if not gridFrame then
+        if not wasOpen then closeGameInventory() end
+        return false, "Grid not found"
+    end
+
+    local itemFrame = gridFrame:FindFirstChild("Item\n" .. itemName)
+        or gridFrame:FindFirstChild(itemName)
+    if not itemFrame then
+        for _, child in ipairs(gridFrame:GetChildren()) do
+            if child.Name:find(itemName) then itemFrame = child break end
+        end
+    end
+    if not itemFrame then
+        if not wasOpen then closeGameInventory() end
+        return false, "Item '" .. itemName .. "' not found"
+    end
+
+    local itemBtn = itemFrame:FindFirstChild("Button")
+        or itemFrame:FindFirstChildWhichIsA("TextButton")
+        or itemFrame:FindFirstChildWhichIsA("ImageButton")
+    if not itemBtn and (itemFrame:IsA("TextButton") or itemFrame:IsA("ImageButton")) then
+        itemBtn = itemFrame
+    end
+    if not itemBtn then
+        if not wasOpen then closeGameInventory() end
+        return false, "No button in item frame"
+    end
+
+    smartClickBtn(itemBtn) task.wait(0.4)
+
+    local useBtn = nil
+    pcall(function() useBtn = inv.Index.ItemIndex.UseHolder.UseButton end)
+    if not useBtn then
+        for _, desc in ipairs(inv:GetDescendants()) do
+            if (desc.Name == "UseButton" or desc.Name == "Use") and
+               (desc:IsA("TextButton") or desc:IsA("ImageButton")) then
+                useBtn = desc break
+            end
+        end
+    end
+    if not useBtn or not useBtn.Visible then
+        if not wasOpen then closeGameInventory() end
+        return false, "Use button hidden"
+    end
+
+    smartClickBtn(useBtn) task.wait(0.3)
+    if not wasOpen then closeGameInventory() end
+    return true, "Used " .. itemName
+end
+
+local function tryAutoUseItems()
+    local now      = tick()
+    local interval = Config.ITEM_USE_INTERVAL * 60
+
+    if Config.AUTO_USE_STRANGE_CONTROLLER then
+        if (now - lastStrangeControllerUse) >= interval then
+            local ok, msg = useGameItem("Strange Controller")
+            if ok then
+                lastStrangeControllerUse = now
+                warn("[AutoItem] Strange Controller used")
+            else
+                warn("[AutoItem] Strange Controller failed: " .. tostring(msg))
+            end
+            task.wait(0.5)
+        end
+    end
+
+    if Config.AUTO_USE_BIOME_RANDOMIZER then
+        local should = false
+        if Config.AUTO_USE_STRANGE_CONTROLLER then
+            if lastStrangeControllerUse > 0
+               and lastBiomeRandomizerUse < lastStrangeControllerUse
+               and (now - lastStrangeControllerUse) >= 300 then
+                should = true
+            end
+        else
+            if (now - lastBiomeRandomizerUse) >= interval then should = true end
+        end
+        if should then
+            local ok, msg = useGameItem("Biome Randomizer")
+            if ok then
+                lastBiomeRandomizerUse = now
+                warn("[AutoItem] Biome Randomizer used")
+            else
+                warn("[AutoItem] Biome Randomizer failed: " .. tostring(msg))
+            end
+            task.wait(0.5)
+        end
+    end
+end
+
+-- ─────────────────────────────────────────────────────────────────────
 -- STATE
 -- ─────────────────────────────────────────────────────────────────────
 
@@ -285,11 +1062,11 @@ local isWalking         = false
 local eggQueue          = {}
 local queuedIds         = {}
 local lastMoveTick      = tick()
-local currentTarget     = nil   -- { target, color, id } of egg being walked to
-local interruptWalk     = false -- set true to abort current egg walk for priority egg
+local currentTarget     = nil
+local interruptWalk     = false
+local isCollectingPickup = false
 
-local function farmEnabled()   return isRunning() and Features.farmEggs and not isCollectingPickup end
-local function buffsEnabled()  return isRunning() and Features.collectBuffs end
+local function farmEnabled()  return isRunning() and Features.farmEggs and not isCollectingPickup end
 local function cloverEnabled() return isRunning() and Features.collectClover end
 
 -- ─────────────────────────────────────────────────────────────────────
@@ -300,7 +1077,7 @@ local function isAlive(inst) return inst ~= nil and inst.Parent ~= nil end
 local function safeGet(fn) local ok,v = pcall(fn) return ok and v or nil end
 local function getChar()  return player.Character end
 local function getHum(c)  return c and c:FindFirstChildOfClass("Humanoid") end
-local function getRoot(c) return c and c:FindFirstChild("HumanoidRootPart") end
+function getRoot(c) return c and c:FindFirstChild("HumanoidRootPart") end
 
 local function resolvePos(inst)
     if not isAlive(inst) then return nil end
@@ -314,31 +1091,32 @@ local function resolvePos(inst)
     end)
 end
 
-local function resolvePath(pathTable)
-    local cur = workspace
-    for _, key in ipairs(pathTable) do
-        cur = cur:FindFirstChild(key)
-        if not cur then return nil end
-    end
-    return cur
-end
-
-local function findClover()
-    for _, v in ipairs(workspace:GetDescendants()) do
-        if string.find(v.Name:lower(), CLOVER_NAME) and (v:IsA("Model") or v:IsA("BasePart")) then
-            return v
+-- Check if egg has already been collected (transparent = collected)
+local function isEggCollected(inst)
+    if not inst or not inst.Parent then return true end
+    local nameLower = string.lower(inst.Name)
+    local isClover  = string.find(nameLower, "clover") ~= nil
+    if not isClover then
+        if inst:IsA("MeshPart") or inst:IsA("BasePart") then
+            if inst.Transparency and inst.Transparency > 0.9 then return true end
+        end
+        local prompt = inst:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if prompt and not prompt.Enabled then return true end
+        if not prompt and inst:IsA("Model") and string.find(nameLower, "egg") then return true end
+        for _, desc in ipairs(inst:GetDescendants()) do
+            if (desc:IsA("MeshPart") or desc:IsA("SpecialMesh") or desc:IsA("BasePart"))
+               and desc.Name ~= "Hitbox" and desc.Name ~= "HumanoidRootPart" then
+                if desc.Transparency and desc.Transparency > 0.9 then return true end
+            end
         end
     end
-    return nil
+    return false
 end
 
 -- ─────────────────────────────────────────────────────────────────────
 -- SMART SORTING
 -- ─────────────────────────────────────────────────────────────────────
 
--- Combined score: higher is better (goes to front of queue).
--- Balance weight 0.5/0.5: rarity score normalized 0-1 vs distance penalty 0-1.
--- Max rarity reference = 1500 (andromeda), max expected dist = 500 studs.
 local MAX_RARITY_REF = 1500
 local MAX_DIST_REF   = 500
 
@@ -346,14 +1124,10 @@ local function eggScore(entry, fromPos)
     if not isAlive(entry.target) then return -math.huge end
     local pos = resolvePos(entry.target)
     if not pos then return -math.huge end
-
     local dist      = (fromPos - pos).Magnitude
     local rarity    = rarityScoreForName(entry.target.Name)
-
-    -- Normalize both 0-1, then combine 50/50
     local rarityNorm = math.min(rarity / MAX_RARITY_REF, 1)
-    local distNorm   = 1 - math.min(dist / MAX_DIST_REF, 1)  -- closer = higher score
-
+    local distNorm   = 1 - math.min(dist / MAX_DIST_REF, 1)
     return rarityNorm * 0.5 + distNorm * 0.5
 end
 
@@ -362,13 +1136,11 @@ local function smartSortQueue()
     local root = getRoot(getChar())
     if not root then return end
     local fromPos = root.Position
-
     table.sort(eggQueue, function(a, b)
         return eggScore(a, fromPos) > eggScore(b, fromPos)
     end)
 end
 
--- Periodic re-sort while walking
 local lastSortTime = 0
 local function maybeSortQueue()
     if tick() - lastSortTime < SORT_INTERVAL then return end
@@ -564,7 +1336,6 @@ local function stepToWaypoint(hum, root, wp, prevPos)
         if (root.Position - wp.Position).Magnitude < REACH_DIST then
             result = "reached" lastMoveTick = tick() stuckCheckCount = 0 break
         end
-
         local now = tick()
         if now - lastPosTime > PROGRESS_CHECK_INTERVAL then
             local moved = (root.Position - lastPos).Magnitude
@@ -605,7 +1376,7 @@ local function stepToWaypoint(hum, root, wp, prevPos)
 end
 
 -- ─────────────────────────────────────────────────────────────────────
--- GENERIC WALK-TO  (buffs + clover)
+-- GENERIC WALK-TO  (clovers)
 -- ─────────────────────────────────────────────────────────────────────
 
 local function walkToTarget(targetInst, touchDist, label, maxAttempts)
@@ -613,23 +1384,17 @@ local function walkToTarget(targetInst, touchDist, label, maxAttempts)
     local hum  = getHum(char)
     local root = getRoot(char)
     if not hum or not root then return false end
-
     maxAttempts = maxAttempts or 3
 
     for attempt = 1, maxAttempts do
         if not isRunning() then return false end
-
         local targetPos = resolvePos(targetInst)
-        if not targetPos then
-            warn("[EggBot] " .. label .. " disappeared, aborting")
-            return false
-        end
+        if not targetPos then warn("[EggBot] " .. label .. " disappeared") return false end
 
         local path = computeSafePath(root.Position, targetPos, 0)
         if not path then
             warn("[EggBot] " .. label .. " path failed attempt " .. attempt)
-            task.wait(0.3)
-            continue
+            task.wait(0.3) continue
         end
 
         local waypoints = path:GetWaypoints()
@@ -639,97 +1404,50 @@ local function walkToTarget(targetInst, touchDist, label, maxAttempts)
             if not isRunning() then broken = true break end
             local prevPos = (i > 1) and waypoints[i-1].Position or root.Position
             if wp.Action == Enum.PathWaypointAction.Jump then doJump(hum) end
-
             local stepResult = stepToWaypoint(hum, root, wp, prevPos)
             if stepResult ~= "reached" then broken = true break end
-
             if (root.Position - targetPos).Magnitude <= touchDist then
-                warn("[EggBot] Touched: " .. label)
-                return true
+                warn("[EggBot] Touched: " .. label) return true
             end
         end
 
         if not broken then
             local finalPos = resolvePos(targetInst)
             if finalPos and (root.Position - finalPos).Magnitude <= touchDist + 2 then
-                warn("[EggBot] Touched (end of path): " .. label)
-                return true
+                warn("[EggBot] Touched (end of path): " .. label) return true
             end
         end
-
-        warn("[EggBot] " .. label .. " attempt " .. attempt .. " failed, retrying...")
         task.wait(0.3)
     end
-
-    warn("[EggBot] " .. label .. " skipped after " .. maxAttempts .. " failed attempts")
+    warn("[EggBot] " .. label .. " skipped after " .. maxAttempts .. " attempts")
     return false
 end
 
 -- ─────────────────────────────────────────────────────────────────────
--- BUFF COLLECTION  (every 2 min, 3 tries)
--- FIX: cooldown only resets on SUCCESS so it retries quickly on fail
--- ─────────────────────────────────────────────────────────────────────
-
-local function runBuffCollection()
-    if not buffsEnabled() then return end
-    if isCollectingPickup then return end
-
-    isCollectingPickup = true
-    warn("[EggBot] Starting buff run (pausing eggs)")
-
-    for _, buffDef in ipairs(BUFF_GIVERS) do
-        if not buffsEnabled() or not isRunning() then break end
-
-        local buffPart = resolvePath(buffDef.path)
-        if not buffPart then
-            warn("[EggBot] BuffGiver not found: " .. buffDef.name)
-            continue
-        end
-
-        local success = walkToTarget(buffPart, BUFF_TOUCH_DIST, "Buff:" .. buffDef.name, BUFF_MAX_ATTEMPTS)
-
-        if success then
-            warn("[EggBot] Buff collected: " .. buffDef.name)
-            lastBuffTime = tick()   -- ✅ only reset timer on success
-        else
-            warn("[EggBot] Buff failed — will retry in ~30s")
-            lastBuffTime = tick() - BUFF_INTERVAL + 30  -- retry in ~30s not full 2min
-        end
-    end
-
-    isCollectingPickup = false
-    warn("[EggBot] Buff run done, resuming eggs")
-    processQueue()
-end
-
--- ─────────────────────────────────────────────────────────────────────
--- CLOVER COLLECTION  (every 4 min, 3 tries)
--- FIX: same cooldown-on-success logic
+-- CLOVER COLLECTION LOOP
 -- ─────────────────────────────────────────────────────────────────────
 
 local function runCloverCollection()
     if not cloverEnabled() then return end
     if isCollectingPickup then return end
 
-    local clover = findClover()
-    if not clover then
-        warn("[EggBot] No clover found in workspace")
-        -- Retry in 30s instead of full 4min
-        lastCloverTime = tick() - CLOVER_INTERVAL + 30
+    local clovers = findClovers()
+    if #clovers == 0 then
+        warn("[EggBot] No clovers found")
         return
     end
 
     isCollectingPickup = true
     warn("[EggBot] Starting clover run (pausing eggs)")
 
-    local success = walkToTarget(clover, CLOVER_TOUCH_DIST, "Clover", 3)
-
-    if success then
-        warn("[EggBot] Clover collected!")
-        lastCloverTime = tick()             -- ✅ only reset on success
-    else
-        warn("[EggBot] Clover failed — will retry in ~30s")
-        lastCloverTime = tick() - CLOVER_INTERVAL + 30
+    for _, cloverEntry in ipairs(clovers) do
+        if not cloverEnabled() or not isRunning() then break end
+        local success = walkToTarget(cloverEntry.target, CLOVER_TOUCH_DIST, "Clover", 3)
+        if success then
+            warn("[EggBot] Clover collected!")
+            sendGenericWebhook(Config.WEBHOOK_URL, "🍀 Clover Collected!",
+                "Collected a **Clover**", 65280, "", {})
+        end
     end
 
     isCollectingPickup = false
@@ -737,32 +1455,14 @@ local function runCloverCollection()
     processQueue()
 end
 
--- ─────────────────────────────────────────────────────────────────────
--- PICKUP SCHEDULER
--- ─────────────────────────────────────────────────────────────────────
-
+-- Clover scheduler
 task.spawn(function()
-    task.wait(5)
-    if buffsEnabled()  then runBuffCollection()  end
-    task.wait(2)
-    if cloverEnabled() then runCloverCollection() end
-
+    task.wait(10)
     while true do
-        task.wait(1)
+        task.wait(30)
         if not isRunning() or isCollectingPickup then continue end
-
-        local now = tick()
-
-        if cloverEnabled() and now - lastCloverTime >= CLOVER_INTERVAL then
-            local waited = 0
-            while isWalking and waited < 10 do task.wait(0.5) waited += 0.5 end
-            isWalking = false
+        if cloverEnabled() and not isWalking then
             runCloverCollection()
-        elseif buffsEnabled() and now - lastBuffTime >= BUFF_INTERVAL then
-            local waited = 0
-            while isWalking and waited < 10 do task.wait(0.5) waited += 0.5 end
-            isWalking = false
-            runBuffCollection()
         end
     end
 end)
@@ -771,27 +1471,19 @@ end)
 -- AUTO-SWITCH: interrupt for nearby priority eggs
 -- ─────────────────────────────────────────────────────────────────────
 
--- Called whenever a new egg is queued. If it's priority AND close enough
--- AND we're currently walking to a lower-priority egg, interrupt.
 local function checkShouldInterrupt(newEntry)
     if not Features.autoSwitch then return end
     if not isWalking then return end
     if not PRIORITY_SET[newEntry.target.Name] then return end
     if isCollectingPickup then return end
-
     local root = getRoot(getChar())
     if not root then return end
-
     local newPos = resolvePos(newEntry.target)
     if not newPos then return end
-
     local distToNew = (root.Position - newPos).Magnitude
     if distToNew > INTERRUPT_MAX_DIST then return end
-
-    -- Only interrupt if current target is NOT also priority
     if currentTarget and PRIORITY_SET[currentTarget.target.Name] then return end
-
-    warn("[EggBot] 🔄 Priority egg detected nearby (" .. newEntry.target.Name .. ") — interrupting current path!")
+    warn("[EggBot] 🔄 Priority egg nearby (" .. newEntry.target.Name .. ") — interrupting!")
     interruptWalk = true
 end
 
@@ -812,16 +1504,30 @@ local function walkToEgg(targetInstance, eggColor)
     local root = getRoot(char)
     if not hum or not root then return "fail" end
 
-    interruptWalk = false  -- clear any previous interrupt
+    interruptWalk = false
+
+    -- Skip if already collected
+    if isEggCollected(targetInstance) then
+        warn("[EggBot] Egg already collected, skipping: " .. targetInstance.Name)
+        return "done"
+    end
+
+    -- Skip if in excluded zone
+    local targetPos = resolvePos(targetInstance)
+    if targetPos and isPositionExcluded(targetPos) then
+        warn("[EggBot] Egg in excluded zone, skipping: " .. targetInstance.Name)
+        return "done"
+    end
 
     for attempt = 1, MAX_PATH_ATTEMPTS do
         if not farmEnabled() then return "stopped" end
 
-        -- Re-sort queue before each attempt so we have fresh info
         maybeSortQueue()
 
-        local targetPos = resolvePos(targetInstance)
+        targetPos = resolvePos(targetInstance)
         if not targetPos then return "done" end
+
+        if isEggCollected(targetInstance) then return "done" end
 
         local waypoints = nil
         for _, extraRadius in ipairs({0,2,4,6,8}) do
@@ -830,14 +1536,14 @@ local function walkToEgg(targetInstance, eggColor)
                 local wps = candidate:GetWaypoints()
                 if not pathHasGap(wps) then
                     waypoints = wps
-                    if extraRadius > 0 then warn("[EggBot] Gap-free path found with radius +" .. extraRadius) end
+                    if extraRadius > 0 then warn("[EggBot] Gap-free path radius +" .. extraRadius) end
                     break
                 end
             end
         end
 
         if not waypoints then
-            warn("[EggBot] No gap-free path on attempt " .. attempt)
+            warn("[EggBot] No gap-free path attempt " .. attempt)
             task.wait(0.2) continue
         end
 
@@ -852,10 +1558,12 @@ local function walkToEgg(targetInstance, eggColor)
                 warn("[EggBot] Path interrupted for priority egg")
                 pathBroken = true break
             end
+            if isEggCollected(targetInstance) then
+                pathBroken = true break
+            end
 
             local prevPos = (i > 1) and waypoints[i-1].Position or root.Position
             if wp.Action == Enum.PathWaypointAction.Jump then doJump(hum) end
-
             local stepResult = stepToWaypoint(hum, root, wp, prevPos)
 
             if stepResult == "interrupted" then
@@ -873,7 +1581,7 @@ local function walkToEgg(targetInstance, eggColor)
         if pathBroken then task.wait(0.1) continue end
 
         local collected = false
-        if isAlive(targetInstance) then
+        if isAlive(targetInstance) and not isEggCollected(targetInstance) then
             for _, v in ipairs(targetInstance:GetDescendants()) do
                 if v:IsA("ProximityPrompt") then
                     task.wait(0.5)
@@ -893,12 +1601,41 @@ local function walkToEgg(targetInstance, eggColor)
                 saveStats()
                 warn("[EggBot] Collected " .. eggName .. " +" .. points .. " pts (total: " .. totalPoints .. ")")
             end
+            task.spawn(function() sendEggWebhook(eggName) end)
             rescanWorkspace()
         end
 
         return "done"
     end
+
+    sendGenericWebhook(Config.WEBHOOK_URL, "⚠️ Pathfinding Failed",
+        "Failed to collect **" .. targetInstance.Name .. "**", 16711680, "")
     return "fail"
+end
+
+-- ─────────────────────────────────────────────────────────────────────
+-- RARE EGG WALKING (highest priority, bypasses normal queue)
+-- ─────────────────────────────────────────────────────────────────────
+
+local function processRareEggQueue()
+    while #rareEggQueue > 0 and farmEnabled() do
+        local entry = table.remove(rareEggQueue, 1)
+        if entry.part and entry.part.Parent then
+            warn("[EggBot] 🌟 Collecting rare egg: " .. entry.rareName)
+            local result = walkToEgg(entry.target, entry.color)
+            if result == "done" then
+                sendGenericWebhook(
+                    Config.WEBHOOK_RARE_EGGS,
+                    "🎉 RARE EGG COLLECTED!",
+                    "Successfully collected: **" .. entry.rareName .. "**!",
+                    65280,
+                    getPingText(),
+                    buildRarityFields(entry.rareName)
+                )
+            end
+            task.wait(0.3)
+        end
+    end
 end
 
 -- ─────────────────────────────────────────────────────────────────────
@@ -920,11 +1657,23 @@ end
 
 function processQueue()
     if not farmEnabled() or isWalking or #eggQueue == 0 then return end
+
+    -- Process rare eggs first before touching normal queue
+    if #rareEggQueue > 0 then
+        task.spawn(processRareEggQueue)
+        return
+    end
+
     isWalking = true
     task.spawn(function()
         local hardTimer = task.delay(WALK_HARD_TIMEOUT, function() releaseWalking() end)
         pruneQueue()
-        smartSortQueue()  -- sort before popping
+        smartSortQueue()
+
+        -- Auto-use items check
+        pcall(tryAutoUseItems)
+        -- Scan for rare eggs
+        pcall(scanForRareEggs)
 
         local data = table.remove(eggQueue, 1)
         if data and queuedIds[data.id] then
@@ -936,8 +1685,6 @@ function processQueue()
                 local result = walkToEgg(data.target, data.color)
 
                 if result == "interrupted" then
-                    -- Re-queue the interrupted egg so it can be picked up again
-                    -- (it will be re-scored and re-sorted on next processQueue)
                     if isAlive(data.target) then
                         queuedIds[data.id] = true
                         table.insert(eggQueue, { target=data.target, color=data.color, id=data.id })
@@ -969,6 +1716,10 @@ function checkEgg(v)
         local uid = name .. tostring(v)
         if queuedIds[uid] then return end
 
+        -- Check excluded zone
+        local pos = resolvePos(v)
+        if pos and isPositionExcluded(pos) then return end
+
         local eggNum     = tonumber(string.match(name, "egg_(%d+)$"))
         local isPriority = PRIORITY_SET[name] == true
         local isPotion   = string.find(name, "potion", 1, true) ~= nil
@@ -985,11 +1736,13 @@ function checkEgg(v)
         end
         if not hasPrompt then return end
 
+        -- Skip already collected
+        if isEggCollected(v) then return end
+
         local entry = { target=v, color=eggColor, id=uid }
         queuedIds[uid] = true
         table.insert(eggQueue, entry)
 
-        -- Check if this should interrupt the current walk
         checkShouldInterrupt(entry)
 
         if farmEnabled() then processQueue() end
@@ -1007,8 +1760,15 @@ player.CharacterAdded:Connect(function()
 end)
 
 -- ─────────────────────────────────────────────────────────────────────
--- AFK ANTI-KICK
+-- AFK ANTI-KICK (upgraded to VirtualUser)
 -- ─────────────────────────────────────────────────────────────────────
+
+local VirtualUser = game:GetService("VirtualUser")
+player.Idled:Connect(function()
+    VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+    task.wait(1)
+    VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+end)
 
 task.spawn(function()
     while true do
@@ -1020,8 +1780,16 @@ task.spawn(function()
     end
 end)
 
+-- Weather check loop
+task.spawn(function()
+    while true do
+        pcall(checkWeather)
+        task.wait(5)
+    end
+end)
+
 -- ─────────────────────────────────────────────────────────────────────
--- UI
+-- UI  (EggBot panel + Settings panel)
 -- ─────────────────────────────────────────────────────────────────────
 
 local oldGui = playerGui:FindFirstChild("EggBotUI")
@@ -1033,9 +1801,10 @@ ScreenGui.ResetOnSpawn   = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent         = playerGui
 
+-- ── Main HUD button ──────────────────────────────────────────────────
 local HUDButton = Instance.new("TextButton")
-HUDButton.Size             = UDim2.new(0, 90, 0, 28)
-HUDButton.Position         = UDim2.new(1, -100, 0, 10)
+HUDButton.Size             = UDim2.new(0, 110, 0, 28)
+HUDButton.Position         = UDim2.new(1, -120, 0, 10)
 HUDButton.AnchorPoint      = Vector2.new(0, 0)
 HUDButton.BackgroundColor3 = Color3.fromRGB(18,18,18)
 HUDButton.TextColor3       = Color3.fromRGB(220,220,220)
@@ -1047,9 +1816,10 @@ HUDButton.ZIndex           = 10
 HUDButton.Parent           = ScreenGui
 Instance.new("UICorner", HUDButton).CornerRadius = UDim.new(0, 6)
 
+-- ── Main panel ───────────────────────────────────────────────────────
 local Panel = Instance.new("Frame")
-Panel.Size             = UDim2.new(0, 240, 0, 360)
-Panel.Position         = UDim2.new(1, -250, 0, 44)
+Panel.Size             = UDim2.new(0, 240, 0, 390)
+Panel.Position         = UDim2.new(1, -260, 0, 44)
 Panel.BackgroundColor3 = Color3.fromRGB(14,14,14)
 Panel.BorderSizePixel  = 0
 Panel.Visible          = false
@@ -1067,23 +1837,23 @@ TitleBar.BorderSizePixel  = 0
 TitleBar.TextColor3       = Color3.fromRGB(200,200,200)
 TitleBar.TextScaled       = true
 TitleBar.Font             = Enum.Font.SourceSansBold
-TitleBar.Text             = "EggBot  v3.2.0"
+TitleBar.Text             = "EggBot  v3.3.0"
 TitleBar.ZIndex           = 10
 TitleBar.Active           = true
 TitleBar.Parent           = Panel
 Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 8)
 
 local ScrollFrame = Instance.new("ScrollingFrame")
-ScrollFrame.Size                 = UDim2.new(1, 0, 1, -32)
-ScrollFrame.Position             = UDim2.new(0, 0, 0, 32)
+ScrollFrame.Size                   = UDim2.new(1, 0, 1, -32)
+ScrollFrame.Position               = UDim2.new(0, 0, 0, 32)
 ScrollFrame.BackgroundTransparency = 1
-ScrollFrame.BorderSizePixel      = 0
-ScrollFrame.ScrollBarThickness   = 3
-ScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(60,60,60)
-ScrollFrame.AutomaticCanvasSize  = Enum.AutomaticSize.Y
-ScrollFrame.CanvasSize           = UDim2.new(0,0,0,0)
-ScrollFrame.ZIndex               = 10
-ScrollFrame.Parent               = Panel
+ScrollFrame.BorderSizePixel        = 0
+ScrollFrame.ScrollBarThickness     = 3
+ScrollFrame.ScrollBarImageColor3   = Color3.fromRGB(60,60,60)
+ScrollFrame.AutomaticCanvasSize    = Enum.AutomaticSize.Y
+ScrollFrame.CanvasSize             = UDim2.new(0,0,0,0)
+ScrollFrame.ZIndex                 = 10
+ScrollFrame.Parent                 = Panel
 
 local ListLayout = Instance.new("UIListLayout", ScrollFrame)
 ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
@@ -1183,12 +1953,19 @@ local function makeStatRow(labelText, order)
     return val
 end
 
--- Build panel
+-- Build main panel
 makeSectionLabel("Status", 1)
 makeToggleRow("Bot Running", isRunning(), 2, function()
     local new = not isRunning()
     setRunning(new)
-    if new then processQueue() warn("[EggBot] ON") else warn("[EggBot] OFF") end
+    if new then
+        toggleNPCPrompts(false)
+        processQueue()
+        warn("[EggBot] ON")
+    else
+        toggleNPCPrompts(true)
+        warn("[EggBot] OFF")
+    end
     return new
 end)
 
@@ -1200,42 +1977,36 @@ makeToggleRow("Farm Eggs", Features.farmEggs, 5, function()
     if Features.farmEggs then processQueue() end
     return Features.farmEggs
 end)
-makeToggleRow("Collect Buffs (2m)", Features.collectBuffs, 6, function()
-    Features.collectBuffs = not Features.collectBuffs
-    return Features.collectBuffs
-end)
-makeToggleRow("Collect Clover (4m)", Features.collectClover, 7, function()
+makeToggleRow("Collect Clovers", Features.collectClover, 6, function()
     Features.collectClover = not Features.collectClover
+    Config.COLLECT_CLOVERS = Features.collectClover
+    saveConfig()
     return Features.collectClover
 end)
-makeToggleRow("Smart Sort", Features.smartSort, 8, function()
+makeToggleRow("Smart Sort", Features.smartSort, 7, function()
     Features.smartSort = not Features.smartSort
     if Features.smartSort then smartSortQueue() end
     return Features.smartSort
 end)
-makeToggleRow("Auto-Switch Target", Features.autoSwitch, 9, function()
+makeToggleRow("Auto-Switch Target", Features.autoSwitch, 8, function()
     Features.autoSwitch = not Features.autoSwitch
     return Features.autoSwitch
 end)
 
-makeDivider(10)
-makeSectionLabel("Stats", 11)
+makeDivider(9)
+makeSectionLabel("Stats", 10)
 
-local timeVal    = makeStatRow("Session Time", 12)
-local pointsVal  = makeStatRow("Points",       13)
-local pphVal     = makeStatRow("Pts / Hour",   14)
-local queueVal   = makeStatRow("Queue Size",   15)
-local statusVal  = makeStatRow("Status",       16)
-local targetVal  = makeStatRow("Target",       17)
-local targetDist = makeStatRow("Target Dist",  18)
+local timeVal    = makeStatRow("Session Time", 11)
+local pointsVal  = makeStatRow("Points",       12)
+local pphVal     = makeStatRow("Pts / Hour",   13)
+local queueVal   = makeStatRow("Queue Size",   14)
+local statusVal  = makeStatRow("Status",       15)
+local targetVal  = makeStatRow("Target",       16)
+local targetDist = makeStatRow("Target Dist",  17)
+local rareVal    = makeStatRow("Rare Queue",   18)
 
 makeDivider(19)
-makeSectionLabel("Next Pickups", 20)
-local nextBuffVal   = makeStatRow("Buff in",   21)
-local nextCloverVal = makeStatRow("Clover in", 22)
-
-makeDivider(23)
-makeSectionLabel("Queue", 24)
+makeSectionLabel("Queue", 20)
 
 local queueListLbl = Instance.new("TextLabel", ScrollFrame)
 queueListLbl.Size             = UDim2.new(1, 0, 0, 20)
@@ -1245,8 +2016,322 @@ queueListLbl.TextScaled       = true
 queueListLbl.Font             = Enum.Font.SourceSans
 queueListLbl.Text             = "No eggs queued"
 queueListLbl.TextXAlignment   = Enum.TextXAlignment.Left
-queueListLbl.LayoutOrder      = 25
+queueListLbl.LayoutOrder      = 21
 queueListLbl.ZIndex           = 11
+
+makeDivider(22)
+makeSectionLabel("Webhook", 23)
+
+local webhookVal = makeStatRow("Enabled", 24)
+
+-- ── Settings Panel ────────────────────────────────────────────────────
+local SettingsOverlay = Instance.new("Frame")
+SettingsOverlay.Size             = UDim2.new(1, 0, 1, 0)
+SettingsOverlay.BackgroundColor3 = Color3.new(0, 0, 0)
+SettingsOverlay.BackgroundTransparency = 0.5
+SettingsOverlay.BorderSizePixel  = 0
+SettingsOverlay.Visible          = false
+SettingsOverlay.ZIndex           = 15
+SettingsOverlay.Active           = true
+SettingsOverlay.Parent           = ScreenGui
+
+local SettingsPanel = Instance.new("Frame")
+SettingsPanel.AnchorPoint      = Vector2.new(0.5, 0.5)
+SettingsPanel.Size             = UDim2.new(0.88, 0, 0.82, 0)
+SettingsPanel.Position         = UDim2.new(0.5, 0, 0.5, 0)
+SettingsPanel.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
+SettingsPanel.BorderSizePixel  = 0
+SettingsPanel.ClipsDescendants = true
+SettingsPanel.ZIndex           = 16
+SettingsPanel.Parent           = SettingsOverlay
+Instance.new("UICorner", SettingsPanel).CornerRadius = UDim.new(0, 12)
+
+do
+    local spStroke = Instance.new("UIStroke", SettingsPanel)
+    spStroke.Color = Color3.fromRGB(40,40,55) spStroke.Thickness = 1.5
+    local con = Instance.new("UISizeConstraint", SettingsPanel)
+    con.MaxSize = Vector2.new(680, 480) con.MinSize = Vector2.new(420, 300)
+end
+
+local spHeader = Instance.new("Frame", SettingsPanel)
+spHeader.Size             = UDim2.new(1, 0, 0, 40)
+spHeader.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
+spHeader.BorderSizePixel  = 0
+spHeader.ZIndex           = 17
+Instance.new("UICorner", spHeader).CornerRadius = UDim.new(0, 12)
+-- cover bottom rounded corners of header
+local hCover = Instance.new("Frame", spHeader)
+hCover.Size             = UDim2.new(1,0,0,14)
+hCover.Position         = UDim2.new(0,0,1,-14)
+hCover.BackgroundColor3 = Color3.fromRGB(18,18,26)
+hCover.BorderSizePixel  = 0 hCover.ZIndex = 17
+
+local spTitleLbl = Instance.new("TextLabel", spHeader)
+spTitleLbl.Size           = UDim2.new(1,-44,1,0)
+spTitleLbl.Position       = UDim2.new(0,14,0,0)
+spTitleLbl.BackgroundTransparency = 1
+spTitleLbl.Text           = "⚙  EggBot Settings"
+spTitleLbl.TextColor3     = Color3.fromRGB(220,220,240)
+spTitleLbl.TextSize       = 14
+spTitleLbl.Font           = Enum.Font.GothamBold
+spTitleLbl.TextXAlignment = Enum.TextXAlignment.Left
+spTitleLbl.ZIndex         = 18
+
+local spCloseBtn = Instance.new("TextButton", spHeader)
+spCloseBtn.Size             = UDim2.new(0,30,0,30)
+spCloseBtn.Position         = UDim2.new(1,-34,0,5)
+spCloseBtn.BackgroundColor3 = Color3.fromRGB(30,30,40)
+spCloseBtn.BorderSizePixel  = 0
+spCloseBtn.Text             = "✕"
+spCloseBtn.TextColor3       = Color3.fromRGB(160,160,180)
+spCloseBtn.TextSize         = 14
+spCloseBtn.Font             = Enum.Font.GothamBold
+spCloseBtn.ZIndex           = 18
+Instance.new("UICorner", spCloseBtn).CornerRadius = UDim.new(0, 6)
+
+local spScroll = Instance.new("ScrollingFrame", SettingsPanel)
+spScroll.Size                   = UDim2.new(1,0,1,-40)
+spScroll.Position               = UDim2.new(0,0,0,40)
+spScroll.BackgroundTransparency = 1
+spScroll.BorderSizePixel        = 0
+spScroll.CanvasSize             = UDim2.new(0,0,0,600)
+spScroll.ScrollBarThickness     = 3
+spScroll.ScrollBarImageColor3   = Color3.fromRGB(50,50,70)
+spScroll.ZIndex                 = 16
+spScroll.AutomaticCanvasSize    = Enum.AutomaticSize.Y
+
+local LeftCol = Instance.new("Frame", spScroll)
+LeftCol.Size             = UDim2.new(0.5, -10, 1, 0)
+LeftCol.Position         = UDim2.new(0, 10, 0, 0)
+LeftCol.BackgroundTransparency = 1
+local LL = Instance.new("UIListLayout", LeftCol)
+LL.SortOrder = Enum.SortOrder.LayoutOrder LL.Padding = UDim.new(0,6)
+
+local RightCol = Instance.new("Frame", spScroll)
+RightCol.Size             = UDim2.new(0.5, -20, 1, 0)
+RightCol.Position         = UDim2.new(0.5, 0, 0, 0)
+RightCol.BackgroundTransparency = 1
+local RL = Instance.new("UIListLayout", RightCol)
+RL.SortOrder = Enum.SortOrder.LayoutOrder RL.Padding = UDim.new(0,6)
+
+-- alternate cols by order parity
+local spOrder = 0
+local function nextCol() spOrder += 1 return spOrder % 2 == 1 and LeftCol or RightCol end
+
+local function spSectionLabel(text)
+    local col = nextCol()
+    local g = Instance.new("Frame", col)
+    g.Size             = UDim2.new(1,0,0,24)
+    g.BackgroundTransparency = 1 g.ZIndex = 17
+    local lbl = Instance.new("TextLabel", g)
+    lbl.Size           = UDim2.new(1,0,1,0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text           = text
+    lbl.TextColor3     = Color3.fromRGB(0,170,255)
+    lbl.TextSize       = 12 lbl.Font = Enum.Font.GothamBold
+    lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.ZIndex = 17
+    -- mirror to other col for alignment
+    local g2 = Instance.new("Frame", col == LeftCol and RightCol or LeftCol)
+    g2.Size = UDim2.new(1,0,0,24) g2.BackgroundTransparency = 1 g2.ZIndex = 17
+    spOrder += 1
+end
+
+local function spToggle(label, configKey)
+    local col = nextCol()
+    local row = Instance.new("Frame", col)
+    row.Size             = UDim2.new(1,-10,0,38)
+    row.BackgroundColor3 = Color3.fromRGB(22,22,32)
+    row.BorderSizePixel  = 0 row.ZIndex = 17
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size = UDim2.new(1,-60,1,0) lbl.Position = UDim2.new(0,12,0,0)
+    lbl.BackgroundTransparency = 1 lbl.Text = label
+    lbl.TextColor3 = Color3.fromRGB(190,190,210) lbl.TextSize = 11
+    lbl.Font = Enum.Font.GothamMedium lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.ZIndex = 17
+    local track = Instance.new("Frame", row)
+    track.Size = UDim2.new(0,38,0,20) track.Position = UDim2.new(1,-48,0.5,-10)
+    track.BackgroundColor3 = Config[configKey] and Color3.fromRGB(0,170,255) or Color3.fromRGB(40,40,55)
+    track.BorderSizePixel = 0 track.ZIndex = 18
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+    local knob = Instance.new("Frame", track)
+    knob.Size = UDim2.new(0,16,0,16)
+    knob.Position = Config[configKey] and UDim2.new(1,-18,0.5,-8) or UDim2.new(0,2,0.5,-8)
+    knob.BackgroundColor3 = Color3.new(1,1,1) knob.BorderSizePixel = 0 knob.ZIndex = 19
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+    local btn = Instance.new("TextButton", track)
+    btn.Size = UDim2.new(1,0,1,0) btn.BackgroundTransparency = 1
+    btn.Text = "" btn.ZIndex = 20
+    btn.MouseButton1Click:Connect(function()
+        Config[configKey] = not Config[configKey]
+        saveConfig()
+        local on = Config[configKey]
+        local ti = TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+        TweenService:Create(track, ti, {BackgroundColor3 = on and Color3.fromRGB(0,170,255) or Color3.fromRGB(40,40,55)}):Play()
+        TweenService:Create(knob,  ti, {Position        = on and UDim2.new(1,-18,0.5,-8) or UDim2.new(0,2,0.5,-8)}):Play()
+    end)
+end
+
+local function spWebhookInput(label, configKey, placeholder)
+    local col = nextCol()
+    local row = Instance.new("Frame", col)
+    row.Size             = UDim2.new(1,-10,0,52)
+    row.BackgroundColor3 = Color3.fromRGB(22,22,32)
+    row.BorderSizePixel  = 0 row.ZIndex = 17
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size = UDim2.new(1,-24,0,18) lbl.Position = UDim2.new(0,12,0,4)
+    lbl.BackgroundTransparency = 1 lbl.Text = label
+    lbl.TextColor3 = Color3.fromRGB(140,140,170) lbl.TextSize = 10
+    lbl.Font = Enum.Font.GothamBold lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.ZIndex = 17
+    local inputBox = Instance.new("TextBox", row)
+    inputBox.Size = UDim2.new(1,-24,0,24) inputBox.Position = UDim2.new(0,12,0,22)
+    inputBox.BackgroundColor3 = Color3.fromRGB(12,12,18)
+    inputBox.BorderSizePixel = 0
+    inputBox.Text = Config[configKey] or ""
+    inputBox.PlaceholderText = placeholder or "Paste webhook URL..."
+    inputBox.TextColor3 = Color3.fromRGB(100,180,255)
+    inputBox.PlaceholderColor3 = Color3.fromRGB(50,50,70)
+    inputBox.TextSize = 9 inputBox.Font = Enum.Font.GothamMedium
+    inputBox.TextXAlignment = Enum.TextXAlignment.Left
+    inputBox.ClearTextOnFocus = false inputBox.ClipsDescendants = true
+    inputBox.TextTruncate = Enum.TextTruncate.AtEnd inputBox.ZIndex = 18
+    Instance.new("UICorner", inputBox).CornerRadius = UDim.new(0, 5)
+    local pad = Instance.new("UIPadding", inputBox)
+    pad.PaddingLeft = UDim.new(0, 6) pad.PaddingRight = UDim.new(0, 6)
+    local dot = Instance.new("Frame", row)
+    dot.Size = UDim2.new(0,7,0,7) dot.Position = UDim2.new(1,-18,0,9)
+    dot.BackgroundColor3 = (Config[configKey] ~= nil and Config[configKey] ~= "")
+        and Color3.fromRGB(0,200,100) or Color3.fromRGB(200,50,50)
+    dot.BorderSizePixel = 0 dot.ZIndex = 18
+    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+    inputBox.FocusLost:Connect(function()
+        Config[configKey] = inputBox.Text
+        dot.BackgroundColor3 = (inputBox.Text ~= "" and inputBox.Text ~= nil)
+            and Color3.fromRGB(0,200,100) or Color3.fromRGB(200,50,50)
+        saveConfig()
+    end)
+end
+
+local function spSlider(label, configKey, minV, maxV)
+    local col = nextCol()
+    local row = Instance.new("Frame", col)
+    row.Size             = UDim2.new(1,-10,0,38)
+    row.BackgroundColor3 = Color3.fromRGB(22,22,32)
+    row.BorderSizePixel  = 0 row.ZIndex = 17
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size = UDim2.new(0,95,1,0) lbl.Position = UDim2.new(0,12,0,0)
+    lbl.BackgroundTransparency = 1 lbl.Text = label
+    lbl.TextColor3 = Color3.fromRGB(190,190,210) lbl.TextSize = 11
+    lbl.Font = Enum.Font.GothamMedium lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.ZIndex = 17
+    local track = Instance.new("Frame", row)
+    track.Size = UDim2.new(1,-155,0,4) track.Position = UDim2.new(0,110,0.5,-2)
+    track.BackgroundColor3 = Color3.fromRGB(40,40,55) track.BorderSizePixel = 0 track.ZIndex = 17
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+    local valLbl = Instance.new("TextLabel", row)
+    valLbl.Size = UDim2.new(0,28,1,0) valLbl.Position = UDim2.new(1,-36,0,0)
+    valLbl.BackgroundTransparency = 1 valLbl.Text = tostring(Config[configKey])
+    valLbl.TextColor3 = Color3.fromRGB(0,170,255) valLbl.TextSize = 12
+    valLbl.Font = Enum.Font.GothamBold valLbl.ZIndex = 17
+    local initRel = math.clamp((Config[configKey] - minV) / (maxV - minV), 0, 1)
+    local fill = Instance.new("Frame", track)
+    fill.Size = UDim2.new(initRel,0,1,0)
+    fill.BackgroundColor3 = Color3.fromRGB(0,170,255)
+    fill.BorderSizePixel = 0 fill.ZIndex = 17
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+    local knob = Instance.new("Frame", track)
+    knob.Size = UDim2.new(0,14,0,14) knob.Position = UDim2.new(initRel,-7,0.5,-7)
+    knob.BackgroundColor3 = Color3.new(1,1,1) knob.BorderSizePixel = 0 knob.ZIndex = 18
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+    local sliding = false
+    local function updateFromInput(ix)
+        local tPos  = track.AbsolutePosition.X
+        local tSize = track.AbsoluteSize.X
+        local rel   = math.clamp((ix - tPos) / tSize, 0, 1)
+        local value = math.floor(minV + rel * (maxV - minV) + 0.5)
+        rel = (value - minV) / (maxV - minV)
+        fill.Size = UDim2.new(rel,0,1,0)
+        knob.Position = UDim2.new(rel,-7,0.5,-7)
+        valLbl.Text = tostring(value)
+        Config[configKey] = value
+    end
+    local hit = Instance.new("TextButton", track)
+    hit.Size = UDim2.new(1,10,0,24) hit.Position = UDim2.new(0,-5,0.5,-12)
+    hit.BackgroundTransparency = 1 hit.Text = "" hit.ZIndex = 19
+    hit.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            sliding = true updateFromInput(input.Position.X)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            updateFromInput(input.Position.X)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and sliding then
+            sliding = false saveConfig()
+        end
+    end)
+end
+
+-- Populate settings
+spSectionLabel("⚙  General")
+spToggle("Enable Webhooks",           "WEBHOOK_ENABLED")
+spToggle("Collect Clovers",           "COLLECT_CLOVERS")
+spToggle("Auto-Use Strange Ctrl",     "AUTO_USE_STRANGE_CONTROLLER")
+spToggle("Auto-Use Biome Rand.",      "AUTO_USE_BIOME_RANDOMIZER")
+spSlider("Item Use Interval (m)",     "ITEM_USE_INTERVAL", 1, 60)
+spSlider("Collect Dist",              "PROMPT_DISTANCE",   2, 12)
+
+spSectionLabel("✨  Aura Alerts")
+spToggle("Aura Roll Alerts",          "AURA_NOTIFY_ENABLED")
+
+spSectionLabel("📢  Merchant Pings")
+spToggle("Ping Jester",               "PING_MERCHANT_JESTER")
+spToggle("Ping Rin",                  "PING_MERCHANT_RIN")
+spToggle("Ping Mari",                 "PING_MERCHANT_MARI")
+
+spSectionLabel("🔗  Webhook URLs")
+spWebhookInput("Eggs Collected",      "WEBHOOK_URL")
+spWebhookInput("Weather / Biome",     "WEBHOOK_WEATHER")
+spWebhookInput("Rare Eggs",           "WEBHOOK_RARE_EGGS")
+spWebhookInput("Merchants",           "WEBHOOK_MERCHANTS")
+spWebhookInput("Aura Rolls",          "WEBHOOK_AURAS")
+spWebhookInput("Discord Ping ID",     "WEBHOOK_PING_ID",  "Discord user ID...")
+spWebhookInput("Private Server Link", "VIP_SERVER_LINK",  "VIP server link...")
+
+local settingsOpen = false
+local function openSettings()
+    settingsOpen = true
+    SettingsOverlay.Visible = true
+    SettingsPanel.Size = UDim2.new(0.85, 0, 0, 0)
+    TweenService:Create(SettingsPanel, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+        {Size = UDim2.new(0.85, 0, 0.82, 0)}):Play()
+end
+local function closeSettings()
+    settingsOpen = false
+    TweenService:Create(SettingsPanel, TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.In),
+        {Size = UDim2.new(0.85, 0, 0, 0)}):Play()
+    task.delay(0.2, function()
+        if not settingsOpen then SettingsOverlay.Visible = false end
+    end)
+end
+
+spCloseBtn.MouseButton1Click:Connect(closeSettings)
+SettingsOverlay.MouseButton1Click:Connect(closeSettings)
+
+-- Settings panel drag
+local spDragging, spDragStart, spStartPos
+spHeader.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        spDragging = true spDragStart = input.Position spStartPos = SettingsPanel.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then spDragging = false end
+        end)
+    end
+end)
 
 -- Stats loop
 task.spawn(function()
@@ -1261,17 +2346,16 @@ task.spawn(function()
         pointsVal.Text = tostring(totalPoints)
         pphVal.Text    = tostring(pph)
         queueVal.Text  = tostring(#eggQueue)
+        rareVal.Text   = tostring(#rareEggQueue)
 
-        -- Status
         if isCollectingPickup then
-            statusVal.Text = "🍀 Pickup run"
+            statusVal.Text = "🍀 Clover run"
         elseif isWalking then
             statusVal.Text = "🥚 Farming"
         else
             statusVal.Text = "Idle"
         end
 
-        -- Current target info
         local root = getRoot(getChar())
         if currentTarget and isAlive(currentTarget.target) and root then
             local tPos = resolvePos(currentTarget.target)
@@ -1282,13 +2366,8 @@ task.spawn(function()
             targetDist.Text = "—"
         end
 
-        -- Pickup countdowns
-        local buffLeft   = math.max(0, math.ceil(BUFF_INTERVAL   - (tick() - lastBuffTime)))
-        local cloverLeft = math.max(0, math.ceil(CLOVER_INTERVAL - (tick() - lastCloverTime)))
-        nextBuffVal.Text   = string.format("%dm %02ds", math.floor(buffLeft/60),   buffLeft%60)
-        nextCloverVal.Text = string.format("%dm %02ds", math.floor(cloverLeft/60), cloverLeft%60)
+        webhookVal.Text = Config.WEBHOOK_ENABLED and "ON" or "OFF"
 
-        -- Queue list
         if #eggQueue == 0 then
             queueListLbl.Text = "No eggs queued"
             queueListLbl.Size = UDim2.new(1, 0, 0, 20)
@@ -1304,9 +2383,29 @@ task.spawn(function()
     end
 end)
 
--- Panel toggle
+-- Panel toggle (⚙ button opens settings, click panel title toggles panel)
 HUDButton.MouseButton1Click:Connect(function()
-    Panel.Visible = not Panel.Visible
+    if Panel.Visible then
+        Panel.Visible = false
+    else
+        Panel.Visible = true
+    end
+end)
+
+-- Gear icon in title bar opens settings
+local GearBtn = Instance.new("TextButton", Panel)
+GearBtn.Size             = UDim2.new(0, 26, 0, 26)
+GearBtn.Position         = UDim2.new(1, -30, 0, 3)
+GearBtn.BackgroundColor3 = Color3.fromRGB(30,30,40)
+GearBtn.BorderSizePixel  = 0
+GearBtn.Text             = "⚙"
+GearBtn.TextColor3       = Color3.fromRGB(150,150,170)
+GearBtn.TextSize         = 14
+GearBtn.Font             = Enum.Font.GothamBold
+GearBtn.ZIndex           = 12
+Instance.new("UICorner", GearBtn).CornerRadius = UDim.new(0, 6)
+GearBtn.MouseButton1Click:Connect(function()
+    if settingsOpen then closeSettings() else openSettings() end
 end)
 
 -- Panel drag
@@ -1321,10 +2420,10 @@ TitleBar.InputEnded:Connect(function(input)
 end)
 
 -- HUD drag
-local hudDragging, hudDragStart, hudStartPos, didDrag
+local hudDragging, hudDragStart, hudStartPos
 HUDButton.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        hudDragging = true didDrag = false hudDragStart = input.Position hudStartPos = HUDButton.Position
+        hudDragging = true hudDragStart = input.Position hudStartPos = HUDButton.Position
     end
 end)
 HUDButton.InputEnded:Connect(function(input)
@@ -1335,18 +2434,18 @@ UserInputService.InputChanged:Connect(function(input)
     if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
     if panelDragging then
         local delta = input.Position - panelDragStart
-        Panel.Position = UDim2.new(
-            panelStartPos.X.Scale, panelStartPos.X.Offset + delta.X,
-            panelStartPos.Y.Scale, panelStartPos.Y.Offset + delta.Y
-        )
+        Panel.Position = UDim2.new(panelStartPos.X.Scale, panelStartPos.X.Offset + delta.X,
+            panelStartPos.Y.Scale, panelStartPos.Y.Offset + delta.Y)
     end
     if hudDragging then
         local delta = input.Position - hudDragStart
-        if delta.Magnitude > 4 then didDrag = true end
-        HUDButton.Position = UDim2.new(
-            hudStartPos.X.Scale, hudStartPos.X.Offset + delta.X,
-            hudStartPos.Y.Scale, hudStartPos.Y.Offset + delta.Y
-        )
+        HUDButton.Position = UDim2.new(hudStartPos.X.Scale, hudStartPos.X.Offset + delta.X,
+            hudStartPos.Y.Scale, hudStartPos.Y.Offset + delta.Y)
+    end
+    if spDragging and spDragStart and spStartPos then
+        local delta = input.Position - spDragStart
+        SettingsPanel.Position = UDim2.new(spStartPos.X.Scale, spStartPos.X.Offset + delta.X,
+            spStartPos.Y.Scale, spStartPos.Y.Offset + delta.Y)
     end
 end)
 
@@ -1356,9 +2455,12 @@ end)
 
 setRunning(true)
 lastMoveTick = tick()
+toggleNPCPrompts(false)
 
 for _, v in ipairs(workspace:GetChildren()) do checkEgg(v) end
 workspace.ChildAdded:Connect(checkEgg)
+
+pcall(scanForRareEggs)
 processQueue()
 
-print("[EggBot] Bot Loaded - v3.2.0")
+print("[EggBot] Bot Loaded - v3.3.0")

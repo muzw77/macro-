@@ -1,5 +1,5 @@
 -- MADE BY Muzw :D
--- v3.3.0 - Merged: Webhooks, Rare Egg Scanner, Chat Monitor, Excluded Zones,
+-- v3.4.0 - Merged: Webhooks, Rare Egg Scanner, Chat Monitor, Excluded Zones,
 --          Clover Finder (Map-based), Auto-Use Items, Settings Panel, Config Persistence
 --          Removed: ObbyBlessing buff system
 
@@ -30,7 +30,11 @@ local GuiService       = game:GetService("GuiService")
 pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
 pcall(function() workspace.Terrain.Decoration = false end)
 pcall(function() Lighting.GlobalShadows = false end)
-pcall(function() Lighting.FogEnd = 100000 Lighting.FogStart = 100000 end)
+pcall(function()
+    Lighting.FogEnd = 100000
+    Lighting.FogStart = 100000
+end)
+
 pcall(function()
     for _, effect in ipairs(Lighting:GetChildren()) do
         if effect:IsA("PostEffect") then effect.Enabled = false end
@@ -1818,8 +1822,9 @@ Instance.new("UICorner", HUDButton).CornerRadius = UDim.new(0, 6)
 
 -- ── Main panel ───────────────────────────────────────────────────────
 local Panel = Instance.new("Frame")
-Panel.Size             = UDim2.new(0, 240, 0, 390)
-Panel.Position         = UDim2.new(1, -260, 0, 44)
+Panel.AnchorPoint      = Vector2.new(0.5, 0.5)
+Panel.Size             = UDim2.new(0, 520, 0, 420)
+Panel.Position         = UDim2.new(0.5, 0, 0.5, 0)
 Panel.BackgroundColor3 = Color3.fromRGB(14,14,14)
 Panel.BorderSizePixel  = 0
 Panel.Visible          = false
@@ -1955,18 +1960,22 @@ end
 
 -- Build main panel
 makeSectionLabel("Status", 1)
-makeToggleRow("Bot Running", isRunning(), 2, function()
-    local new = not isRunning()
-    setRunning(new)
-    if new then
+local running = false
+
+makeToggleRow("Bot Running", running, 2, function()
+    running = not running
+    setRunning(running)
+
+    if running then
         toggleNPCPrompts(false)
-        processQueue()
+        processQueueSafe() -- IMPORTANT (not processQueue)
         warn("[EggBot] ON")
     else
         toggleNPCPrompts(true)
         warn("[EggBot] OFF")
     end
-    return new
+
+    return running
 end)
 
 makeDivider(3)
@@ -2024,41 +2033,6 @@ makeSectionLabel("Webhook", 23)
 
 local webhookVal = makeStatRow("Enabled", 24)
 
--- ── Settings Panel ────────────────────────────────────────────────────
-local SettingsOverlay = Instance.new("Frame")
-SettingsOverlay.Size             = UDim2.new(1, 0, 1, 0)
-SettingsOverlay.BackgroundColor3 = Color3.new(0, 0, 0)
-SettingsOverlay.BackgroundTransparency = 0.5
-SettingsOverlay.BorderSizePixel  = 0
-SettingsOverlay.Visible          = false
-SettingsOverlay.ZIndex           = 15
-SettingsOverlay.Active           = true
-SettingsOverlay.Parent           = ScreenGui
-
-local SettingsPanel = Instance.new("Frame")
-SettingsPanel.AnchorPoint      = Vector2.new(0.5, 0.5)
-SettingsPanel.Size             = UDim2.new(0.88, 0, 0.82, 0)
-SettingsPanel.Position         = UDim2.new(0.5, 0, 0.5, 0)
-SettingsPanel.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
-SettingsPanel.BorderSizePixel  = 0
-SettingsPanel.ClipsDescendants = true
-SettingsPanel.ZIndex           = 16
-SettingsPanel.Parent           = SettingsOverlay
-Instance.new("UICorner", SettingsPanel).CornerRadius = UDim.new(0, 12)
-
-do
-    local spStroke = Instance.new("UIStroke", SettingsPanel)
-    spStroke.Color = Color3.fromRGB(40,40,55) spStroke.Thickness = 1.5
-    local con = Instance.new("UISizeConstraint", SettingsPanel)
-    con.MaxSize = Vector2.new(680, 480) con.MinSize = Vector2.new(420, 300)
-end
-
-local spHeader = Instance.new("Frame", SettingsPanel)
-spHeader.Size             = UDim2.new(1, 0, 0, 40)
-spHeader.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
-spHeader.BorderSizePixel  = 0
-spHeader.ZIndex           = 17
-Instance.new("UICorner", spHeader).CornerRadius = UDim.new(0, 12)
 -- cover bottom rounded corners of header
 local hCover = Instance.new("Frame", spHeader)
 hCover.Size             = UDim2.new(1,0,0,14)
@@ -2463,4 +2437,4 @@ workspace.ChildAdded:Connect(checkEgg)
 pcall(scanForRareEggs)
 processQueue()
 
-print("[EggBot] Bot Loaded - v3.3.0")
+print("[EggBot] Bot Loaded - v3.4.0")

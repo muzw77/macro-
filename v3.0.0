@@ -1,5 +1,5 @@
 -- MADE BY Muzw :D
--- v3.4.0 - Merged: Webhooks, Rare Egg Scanner, Chat Monitor, Excluded Zones,
+-- v3.3.0 - Merged: Webhooks, Rare Egg Scanner, Chat Monitor, Excluded Zones,
 --          Clover Finder (Map-based), Auto-Use Items, Settings Panel, Config Persistence
 --          Removed: ObbyBlessing buff system
 
@@ -1814,7 +1814,7 @@ HUDButton.BackgroundColor3 = Color3.fromRGB(18,18,18)
 HUDButton.TextColor3       = Color3.fromRGB(220,220,220)
 HUDButton.TextScaled       = true
 HUDButton.Font             = Enum.Font.SourceSansBold
-HUDButton.Text             = "⚙ EggBot"
+HUDButton.Text             = "idk EggBot"
 HUDButton.BorderSizePixel  = 0
 HUDButton.ZIndex           = 10
 HUDButton.Parent           = ScreenGui
@@ -1827,7 +1827,7 @@ Panel.Size             = UDim2.new(0, 520, 0, 420)
 Panel.Position         = UDim2.new(0.5, 0, 0.5, 0)
 Panel.BackgroundColor3 = Color3.fromRGB(14,14,14)
 Panel.BorderSizePixel  = 0
-Panel.Visible          = false
+Panel.Visible          = true
 Panel.ZIndex           = 9
 Panel.Active           = true
 Panel.Parent           = ScreenGui
@@ -2437,4 +2437,4 @@ workspace.ChildAdded:Connect(checkEgg)
 pcall(scanForRareEggs)
 processQueue()
 
-print("[EggBot] Bot Loaded - v3.4.0")
+print("[EggBot] Bot Loaded - v3.3.0")

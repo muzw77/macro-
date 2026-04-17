@@ -93,7 +93,7 @@ local Config = {
 local CONFIG_FILE = "SolsRngSettingsV3.json"
 
 local function saveConfig()
-    if writefile then
+    if typeof(writefile) == "function" then
         pcall(function()
             writefile(CONFIG_FILE, HttpService:JSONEncode(Config))
         end)
@@ -101,18 +101,24 @@ local function saveConfig()
 end
 
 local function loadConfig()
-    if readfile and isfile and isfile(CONFIG_FILE) then
-        pcall(function()
-            local decoded = HttpService:JSONDecode(readfile(CONFIG_FILE))
-            if decoded then
-                local SKIP_KEYS = { Enabled = true }
-                for k, v in pairs(decoded) do
-                    if Config[k] ~= nil and not SKIP_KEYS[k] then
+    if typeof(readfile) == "function" and typeof(isfile) == "function" and isfile(CONFIG_FILE) then
+        local success, decoded = pcall(function()
+            return HttpService:JSONDecode(readfile(CONFIG_FILE))
+        end)
+
+        if success and type(decoded) == "table" then
+            local SKIP_KEYS = { Enabled = true }
+
+            for k, v in pairs(decoded) do
+                if Config[k] ~= nil and not SKIP_KEYS[k] then
+                    if typeof(Config[k]) == typeof(v) then
                         Config[k] = v
                     end
                 end
             end
-        end)
+        else
+            warn("Config load failed or invalid JSON")
+        end
     end
 end
 
